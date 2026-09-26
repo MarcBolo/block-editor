@@ -186,12 +186,15 @@ export class HandleController {
       this.hideHighlight();
       return;
     }
-    const rect = cm.dom.getBoundingClientRect();
+    // 以 Obsidian 行宽（编辑器内容区宽度）为准：
+    // 左缘 = 首行文本起点，右缘 = 内容区右缘；稳定覆盖块内所有行，
+    // 不依赖 coordsAtPos 逐行取终点（视口外行会取不到导致宽度偏窄）
+    const contentRect = cm.contentDOM.getBoundingClientRect();
     el.style.display = 'block';
     el.style.top = from.top + 'px';
     el.style.height = Math.max(to.bottom - from.top, 4) + 'px';
-    el.style.left = rect.left + 'px';
-    el.style.width = rect.width + 'px';
+    el.style.left = from.left + 'px';
+    el.style.width = Math.max(contentRect.right - from.left, 8) + 'px';
   }
 
   private hideHighlight(): void {

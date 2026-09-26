@@ -1,0 +1,563 @@
+.block-editor-handle {
+  position: fixed;
+  width: 20px;
+  height: 20px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-faint);
+  cursor: grab;
+  z-index: 1000;
+  user-select: none;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.block-editor-handle:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.block-editor-handle:active,
+.block-editor-handle.is-dragging {
+  cursor: grabbing;
+}
+
+.block-editor-handle svg {
+  fill: currentColor;
+}
+
+.block-editor-handle.is-dragging {
+  opacity: 0.6;
+}
+
+.block-editor-drag-ghost {
+  position: fixed;
+  z-index: 1001;
+  max-width: 320px;
+  max-height: 120px;
+  overflow: hidden;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  white-space: pre;
+  pointer-events: none;
+  opacity: 0.95;
+}
+
+/* Alt 拖拽 = 复制时，ghost 右侧的提示徽标 */
+.block-editor-drag-ghost.is-copy::after {
+  content: '复制';
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: var(--font-ui-smaller);
+}
+
+.block-editor-indicator {
+  position: fixed;
+  height: 2px;
+  background: var(--interactive-accent);
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.block-editor-selection-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 999;
+}
+
+.block-editor-selection {
+  position: fixed;
+  background: var(--text-selection);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+/* 手柄对应块的浅色高亮（只覆盖文本范围，低透明度减弱视觉） */
+.block-editor-hover-block {
+  position: fixed;
+  background: var(--background-modifier-hover);
+  opacity: 0.55;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 998;
+}
+
+body.block-editor-dragging {
+  cursor: grabbing !important;
+}
+
+body.block-editor-dragging .cm-content {
+  user-select: none;
+}
+
+/* 块菜单两列布局：转换项多，单列菜单太高。
+   实际 DOM（本机 Obsidian 反查确认）：分区内菜单项装在 .menu-group 里，
+   group 与 .menu-separator 平级挂在 .menu-scroll 下，故 grid 加在每个 group 上，
+   各分区内部两两成行 */
+.block-editor-menu-grid .menu-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+}
+
+/* ===== 分栏：Live Preview 编辑态（拖拽手柄 + 分隔条 + 新增） ===== */
+.block-editor-columns-editing {
+  margin: 4px 0;
+}
+
+.block-editor-columns-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+/* 拖拽调宽分隔条 */
+.block-editor-col-resizer {
+  flex: 0 0 8px;
+  cursor: col-resize;
+  position: relative;
+}
+
+.block-editor-col-resizer::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: var(--text-faint);
+  /* 需求：在当前 --text-faint 基础上再减淡 50%（悬停/拖拽时恢复，保持可用性） */
+  opacity: 0.5;
+  transition: background-color 0.1s ease, top 0.1s ease, bottom 0.1s ease, opacity 0.1s ease;
+}
+
+.block-editor-col-resizer:hover::after,
+.block-editor-col-resizer.is-active::after {
+  top: 0;
+  bottom: 0;
+  background: var(--interactive-accent);
+  opacity: 1;
+}
+
+/* 栏容器：手柄 + 文本区（flex: 1 1 0 为无宽度元数据时的均分兜底，
+   与 render() 内联的权重式 flex 配合，避免栏宽退化为内容宽）。
+   简洁风：移除卡片背景/边框/圆角/阴影，背景与页面一致（同阅读模式） */
+.block-editor-col-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 4px 6px;
+  background: transparent;
+  border: none !important; /* 容器不描边，防主题默认边框 */
+  border-width: 0 !important;
+  border-radius: 0 !important; /* 容器直角：去主题默认圆角，视觉更简洁 */
+}
+
+/* 拖拽排序手柄 */
+.block-editor-col-grip {
+  cursor: grab;
+  color: var(--text-faint);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 3px;
+  user-select: none;
+  margin-bottom: 2px;
+}
+
+.block-editor-col-grip:active {
+  cursor: grabbing;
+}
+
+/* 拖拽排序时的目标高亮 */
+.block-editor-col-editor.block-editor-col-drop {
+  outline: 2px dashed var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+/* 栏内容：默认保证最小可点区域（防空栏/小内容高度塌陷无法双击）；
+   空栏加占位提示 "点击编辑此栏" */
+.block-editor-col-content {
+  flex: 1;
+  min-height: 28px;
+}
+
+.block-editor-col-content.block-editor-col-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 90px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  cursor: text;
+}
+
+.block-editor-col-content.block-editor-col-empty::before {
+  content: '点击编辑此栏';
+}
+
+.block-editor-col-textarea {
+  width: 100%;
+  min-height: 90px;
+  flex: 1;
+  resize: vertical;
+  border: none !important; /* 边框线宽度归 0，防 Obsidian 主题 textarea 默认边框 */
+  border-width: 0 !important;
+  background: transparent;
+  /* 与容器背景一致：透出栏内联背景色，防 Obsidian 主题给 textarea 的默认白底 */
+  background-color: transparent !important;
+  color: var(--text-normal);
+  font-family: var(--font-text);
+  font-size: var(--font-text-size);
+  line-height: var(--line-height-normal);
+  padding: 0;
+  outline: none !important;
+  box-sizing: border-box;
+  border-radius: 0 !important; /* 编辑框直角，与容器齐平 */
+  box-shadow: none !important; /* 去主题 textarea 内嵌阴影/边框感 */
+}
+
+/* grip 命令菜单（横排纯图标：设置背景色 / 新增栏 / 删除栏） */
+.block-editor-col-menu {
+  position: fixed;
+  z-index: 1000;
+  padding: 3px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+}
+
+.block-editor-col-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  border-radius: 50px;
+  background: transparent;
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.block-editor-col-menu-item svg {
+  display: block;
+}
+
+.block-editor-col-menu-item:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+}
+
+.block-editor-col-menu-item:disabled {
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 设置背景色选色浮层（5 预设色 + 自定义选色窗 + 清除），简洁风 */
+.block-editor-col-picker {
+  position: fixed;
+  z-index: 1001;
+  min-width: 200px;
+  padding: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.block-editor-col-picker-title {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.block-editor-col-picker-swatches {
+  display: flex;
+  gap: 6px;
+}
+
+.block-editor-col-picker-swatch {
+  flex: 1;
+  max-width: 24px;
+  height: 22px;
+  border-radius: 50px;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.block-editor-col-picker-swatch:hover {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+/* 自定义选色窗：原生取色器 + hex 输入 同一行 */
+.block-editor-col-picker-custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.block-editor-col-picker-native {
+  flex: none;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  border-radius: 50px;
+  background: none;
+  cursor: pointer;
+}
+
+.block-editor-col-picker-native::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.block-editor-col-picker-native::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+.block-editor-col-picker-hex {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+}
+
+.block-editor-col-picker-hex input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+
+.block-editor-col-picker-hex input.is-invalid {
+  border-color: var(--text-error);
+}
+
+.block-editor-col-picker-apply,
+.block-editor-col-picker-clear {
+  border: none;
+  box-shadow: none;
+  border-radius: 50px;
+  padding: 3px 8px;
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.block-editor-col-picker-apply:hover,
+.block-editor-col-picker-clear:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* ===== 分栏：Live Preview 渲染态 widget ===== */
+.block-editor-columns-widget {
+  display: flex !important;
+  align-items: stretch;
+  gap: 18px;
+  margin: 4px 0;
+  width: 100%;
+}
+
+/* row 必须占满 widget 可用宽：widget 是 flex 容器时 row 是 flex item，
+   默认 flex: 0 1 auto 会收缩为内容宽导致右侧留白（阅读模式 callout-content 占满所以正常） */
+.block-editor-columns-widget > .block-editor-columns-row {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 防止 Obsidian 的 callout 容器在 widget 外再套一层框 */
+.markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+
+.markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout > .callout-title {
+  display: none;
+}
+
+/* ===== 分栏：multi-column callout ===== */
+/* 外壳去 chrome（!important 防主题/内部样式竞争） */
+body.be-columns-live-on .callout[data-callout='multi-column'] {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+
+body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-title {
+  display: none;
+}
+
+/* 光标落在标记行时临时显示标题，保证 `[!multi-column]` 可编辑 */
+body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-title:has(.cm-active) {
+  display: flex;
+}
+
+/* 内容横向排：仅外壳直接内容容器（> 收紧），不命中子栏的 callout-content */
+body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-content {
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+  /* 收敛潜在垂直 padding（主题若给 callout-content 默认 padding 会放大上下间距） */
+  padding: 0 !important;
+}
+
+/* 阅读模式专用：外壳上下间距 1em（不再左右缩进），外壳与子栏圆角统一 5px。
+   仅限 reading/preview 视图，不影响 Live Preview widget */
+body.be-columns-live-on .markdown-reading-view .callout[data-callout='multi-column'],
+body.be-columns-live-on .markdown-preview-view .callout[data-callout='multi-column'] {
+  margin: 1em 0 !important;
+  border-radius: 5px !important;
+}
+
+body.be-columns-live-on .markdown-reading-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .callout,
+body.be-columns-live-on .markdown-preview-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .callout {
+  border-radius: 5px !important;
+}
+
+/* 阅读模式专用：子栏内部文字距背景色边缘 +5px。
+   子栏 callout 的 padding 已在上方清零（0），callout-content 主题无默认 padding，
+   实际现状间距为 0，故按实际默认 +5px 落地为 5px；只动左右，上下保持默认。
+   同时覆盖子栏被 .cm-callout 包装的结构。仅限 reading/preview 视图 */
+body.be-columns-live-on .markdown-reading-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .callout
+  > .callout-content,
+body.be-columns-live-on .markdown-reading-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .cm-callout
+  > .callout
+  > .callout-content,
+body.be-columns-live-on .markdown-preview-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .callout
+  > .callout-content,
+body.be-columns-live-on .markdown-preview-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .cm-callout
+  > .callout
+  > .callout-content {
+  padding-left: 5px !important;
+  padding-right: 5px !important;
+}
+
+/* 实时预览渲染态专用：子栏内部文字距背景色边缘 +5px（与阅读模式一致）。
+   覆盖直接子级与 .cm-callout 包装两种结构；
+   不命中编辑态 .block-editor-col-editor（其已有 padding: 4px 6px） */
+body.be-columns-live-on .markdown-source-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .callout
+  > .callout-content,
+body.be-columns-live-on .markdown-source-view
+  .callout[data-callout='multi-column']
+  .callout-content
+  > .cm-callout
+  > .callout
+  > .callout-content {
+  padding-left: 5px !important;
+  padding-right: 5px !important;
+}
+
+/* 栏：兼容直接子级与容器包装（.cm-callout）两种结构，去 chrome 并均分。
+   背景用无 !important 的 background-color（非 shorthand）兜底透明：
+   阅读模式 MarkdownPostProcessor 按 `[!col|bg=#xxxxxx]` 设置的内联 background-color 才能覆盖 */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout,
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout {
+  flex: 1 1 0;
+  min-width: 0;
+  background-color: transparent;
+  background-image: none;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout > .callout-title,
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout > .callout-title {
+  display: none;
+}
+
+/* 栏标记行被编辑时临时显示其标题 */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content .callout-title:has(.cm-active) {
+  display: flex;
+}
+
+/* 栏间结构性节点：
+   阅读视图空段直接隐藏；
+   Live Preview 渲染为 1px 竖直分隔线（不用 display:none，避免干扰编辑器容器测量） */
+body.be-columns-live-on .markdown-reading-view
+  .callout[data-callout='multi-column']
+  > .callout-content
+  > :not(.callout):not(.cm-callout),
+body.be-columns-live-on .markdown-preview-view
+  .callout[data-callout='multi-column']
+  > .callout-content
+  > :not(.callout):not(.cm-callout) {
+  display: none;
+}
+
+body.be-columns-live-on .markdown-source-view
+  .callout[data-callout='multi-column']
+  > .callout-content
+  > :not(.callout):not(.cm-callout):not(.block-editor-columns-raw) {
+  flex: 0 0 2px;
+  width: 2px;
+  min-width: 2px;
+  align-self: stretch;
+  min-height: 24px;
+  padding: 0 !important;
+  background: var(--background-modifier-border);
+  border-radius: 1px;
+  overflow: hidden;
+  font-size: 0;
+  color: transparent;
+}

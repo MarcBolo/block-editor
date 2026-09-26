@@ -74,6 +74,7 @@ export interface CMDoc {
 export interface CMView {
   dom: HTMLElement;
   scrollDOM: HTMLElement;
+  contentDOM: HTMLElement;
   state: { doc: CMDoc };
   posAtCoords(coords: { x: number; y: number }): number | null;
   coordsAtPos(pos: number): { top: number; bottom: number; left: number; right: number } | null;
