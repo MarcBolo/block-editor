@@ -1,0 +1,23 @@
+{
+  "name": "block-editor",
+  "version": "0.11.3",
+  "description": "Notion 风格块编辑：块手柄、拖拽排序、多选、类型转换与斜杠命令",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node scripts/parity.cjs",
+    "repro": "node scripts/cm6-repro.cjs"
+  },
+  "author": "you",
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.23.1",
+    "jsdom": "^29.1.1",
+    "obsidian": "latest",
+    "typescript": "^5.5.4"
+  }
+}
