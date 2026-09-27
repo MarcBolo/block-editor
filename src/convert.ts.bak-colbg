@@ -3,14 +3,7 @@ import type { Editor } from 'obsidian';
 import type { BlockContext, BlockRange, TurnIntoType } from './types';
 import type BlockEditorPlugin from './main';
 import type { ColumnsOpts } from './columns-preview';
-import {
-  BLOCK_COLOR_RE,
-  BLOCK_COLOR_SPAN_RE,
-  normalizeBlockColor,
-  parseBlockColorValue,
-} from './block-color';
-import { deriveDarkColor, parseColBgMeta } from './col-bg';
-import type { ColBg } from './col-bg';
+import { BLOCK_COLOR_RE, normalizeBlockColor } from './block-color';
 import { getIndent, getLines } from './util';
 
 /** 分栏外壳标记行：`> [!multi-column]`（宽度参数 `|NN-NN` 可选） */
@@ -51,8 +44,8 @@ interface ParsedColumns {
   segments: string[];
   /** 各栏宽度百分比（无元数据时为空数组） */
   widths: number[];
-  /** 每栏背景色（双色模型：light 浅色 / dark 深色，无背景为 null） */
-  bgs: (ColBg | null)[];
+  /** 每栏背景色（无背景为 null） */
+  bgs: (string | null)[];
   /** 二维行：每行的栏数（空数组 = 单行） */
   rows: number[];
   /** 外壳外观参数（gap / valign / radius / border） */
@@ -62,15 +55,13 @@ interface ParsedColumns {
 }
 
 /** 由各栏文本构建分栏 markdown（组合为分栏与编辑态写回共用）。
- *  bgs[i] 为第 i 栏的背景（ColBg），为空/null 时不写 `|bg=` 参数；
- *  浅色写 `bg=#xxxxxx`；仅当深色为显式覆盖值（≠ 自动推导）时才追加
- *  `bg-dark=#yyyyyy`（自动推导值由读取端按同一算法复现，保持旧单值格式）。
+ *  bgs[i] 为第 i 栏的背景色（如 '#ffe8e8'），为空/null 时不写 `|bg=` 参数。
  *  rowEnds 为二维行的行末栏索引（如 [1,3] 表示 0-1 / 2-3 两行），空数组 = 单行。
  *  opts 为外壳外观参数（gap / valign / radius / border）。 */
 export function buildColumnsMarkdown(
   segments: string[],
   widths?: number[],
-  bgs?: (ColBg | null)[],
+  bgs?: (string | null)[],
   rowEnds?: number[],
   opts?: ColumnsOpts
 ): string {
@@ -123,14 +114,7 @@ export function buildColumnsMarkdown(
       if (rowEnds?.includes(i - 1)) out.push('>> [!colrow]');
     }
     const bg = bgs?.[i];
-    if (bg && bg.light) {
-      const colParams = [`bg=${bg.light}`];
-      // 显式覆盖的深色才落库；自动推导值不写（读取端按同一算法复现）
-      if (bg.dark && bg.dark !== deriveDarkColor(bg.light)) colParams.push(`bg-dark=${bg.dark}`);
-      out.push(`>> [!col|${colParams.join('|')}]`);
-    } else {
-      out.push('>> [!col]');
-    }
+    out.push(bg ? `>> [!col|bg=${bg}]` : '>> [!col]');
     for (const line of seg.split('\n')) out.push(line.trim() === '' ? '>>' : '>> ' + line);
   });
   return out.join('\n');
@@ -618,7 +602,7 @@ export class BlockConverter {
   ): ParsedColumns | null {
     const lines = getLines(editor, shellStart, shellEnd);
     const segments: string[] = [];
-    const bgs: (ColBg | null)[] = [];
+    const bgs: (string | null)[] = [];
     const colLines: number[] = [];
     const colRels: number[] = [];
     const rowMarks: number[] = [];
@@ -640,7 +624,8 @@ export class BlockConverter {
         colLines.push(shellStart + i);
         colRels.push(i);
         const meta = line.match(/\[!col\|([^\]]*)\]/);
-        bgs.push(parseColBgMeta(meta ? meta[1] : ''));
+        const bgm = meta ? meta[1].match(/(?:^|\s)bg=([#0-9a-fA-F]{3,8})/) : null;
+        bgs.push(bgm ? bgm[1] : null);
         continue;
       }
       const m = line.match(/^>\s*>\s?(.*)$/);
@@ -959,32 +944,19 @@ export class BlockConverter {
     return true;
   }
 
-  /** 解析块首行的颜色标记（无标记 / 颜色非法返回 null；span 形态写在块末行，
-   *  首行无 %% 时回溯末行再解析 span） */
+  /** 解析块首行的颜色标记（无标记 / 颜色非法返回 null） */
   blockColorOf(block: BlockContext): string | null {
-    const first = this.parseBlockColor(block.editor.getLine(block.start));
-    if (first) return first;
-    // span 承载形态写回在块末行（单行块时首行即末行，已被上面命中）
-    if (block.end > block.start) return this.parseBlockColor(block.editor.getLine(block.end));
-    return null;
+    return this.parseBlockColor(block.editor.getLine(block.start));
   }
 
-  /** 解析单行文本中的块颜色标记（无 / 非法返回 null；双值语法取浅色；
-   *  兼容存量 %% 形态与 span 元素承载形态） */
+  /** 解析单行文本中的块颜色标记（无 / 非法返回 null） */
   parseBlockColor(line: string): string | null {
-    const m = BLOCK_COLOR_RE.exec(line) ?? BLOCK_COLOR_SPAN_RE.exec(line);
+    const m = BLOCK_COLOR_RE.exec(line);
     if (!m) return null;
-    return parseBlockColorValue(m[1])?.light ?? null;
+    return normalizeBlockColor(m[1]);
   }
 
-  /**
-   * 给当前块打颜色标记：在块末行行尾写入空元素
-   * `<span data-block-color="<color>"></span>` 承载（阅读模式元素形态直接上色），
-   * 替换旧的行尾 `%% block-color:<color> %%` 写回形态；已有标记（%% 或 span）
-   * 均替换颜色值。存量 `%%...%%` 不迁移存量文档，但写回时清理避免同块双标记。
-   * 颜色属性值格式与 %% 语法体一致（支持手写 `light|dark` 双主题覆盖深色）。
-   * 分栏 callout 内写回不阻断，但提示阅读模式仅实时预览生效。
-   */
+  /** 给当前块打颜色标记：块首行行尾追加 `%% block-color:<color> %%`（已有标记则替换颜色） */
   setBlockColor(block: BlockContext, color: string): void {
     const editor = block.editor;
     const norm = normalizeBlockColor(color);
@@ -992,52 +964,24 @@ export class BlockConverter {
       new Notice('不支持的颜色：' + color);
       return;
     }
-    // 块首行存量 %% 标记：写回 span 时一并清理（避免同块双标记重复上色）
-    const first = editor.getLine(block.start);
-    const firstNext = first.replace(BLOCK_COLOR_RE, '').replace(/[ \t]+$/u, '');
-    if (firstNext !== first) editor.setLine(block.start, firstNext);
-    // 目标行 = 块末行：替换已有 span 后追加（单行块时首行可能已被上面清理）
-    const endIdx = block.end;
-    const endLine = editor.getLine(endIdx);
-    const next =
-      endLine
-        .replace(BLOCK_COLOR_SPAN_RE, '')
-        .replace(BLOCK_COLOR_RE, '')
-        .replace(/[ \t]+$/u, '') + `<span data-block-color="${norm}"></span>`;
-    editor.setLine(endIdx, next);
-    // 分栏 callout 内：提示阅读模式受 Obsidian 渲染限制仅实时预览生效
-    // （建议改用分栏 bg 元数据 |bg= 做整栏配色）；提示不阻断写回
-    if (this.insideColumns(editor, block)) {
-      new Notice(
-        '该块位于分栏 callout 内：阅读模式受 Obsidian 渲染限制，颜色仅实时预览生效；建议改用分栏 bg 元数据 |bg= 做整栏配色',
-        6000
-      );
-    }
+    const line = editor.getLine(block.start);
+    const next = BLOCK_COLOR_RE.test(line)
+      ? line.replace(BLOCK_COLOR_RE, `%% block-color:${norm} %%`)
+      : line.replace(/[ \t]+$/u, '') + ` %% block-color:${norm} %%`;
+    editor.setLine(block.start, next);
     this.ctx.handle.hideHandle();
   }
 
-  /** 清除当前块的颜色标记（span 形态或存量 %% 形态；无标记时提示） */
+  /** 清除当前块的颜色标记（无标记时提示） */
   clearBlockColor(block: BlockContext): void {
     const editor = block.editor;
-    let found = false;
-    for (let i = block.start; i <= block.end; i++) {
-      const line = editor.getLine(i);
-      const next = line
-        .replace(BLOCK_COLOR_SPAN_RE, () => {
-          found = true;
-          return '';
-        })
-        .replace(BLOCK_COLOR_RE, () => {
-          found = true;
-          return '';
-        })
-        .replace(/[ \t]+$/u, '');
-      if (next !== line) editor.setLine(i, next);
-    }
-    if (!found) {
+    const line = editor.getLine(block.start);
+    if (!BLOCK_COLOR_RE.test(line)) {
       new Notice('当前块没有颜色标记');
       return;
     }
+    const next = line.replace(BLOCK_COLOR_RE, '').replace(/[ \t]+$/u, '');
+    editor.setLine(block.start, next);
     this.ctx.handle.hideHandle();
   }
 }

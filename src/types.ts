@@ -39,7 +39,13 @@ export type TurnIntoType =
   | 'mermaid'
   | 'math'
   | 'table'
-  | 'divider';
+  | 'divider'
+  // M5 转换类型扩展：常用代码语言作为「转换为」目标（等同于 code 换语言）
+  | 'html'
+  | 'css'
+  | 'js'
+  | 'json'
+  | 'yaml';
 
 export type BlockType = DetectedBlockType | TurnIntoType;
 

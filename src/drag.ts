@@ -1,5 +1,5 @@
 import type { Editor, MarkdownView, TFile } from 'obsidian';
-import type { BlockContext, BlockRange, BlockType } from './types';
+import type { BlockContext, BlockRange, BlockType, CMDoc, CMView } from './types';
 import type BlockEditorPlugin from './main';
 import { getCM, getIndent, getLines } from './util';
 
@@ -16,6 +16,10 @@ interface DragState {
   nestCol: number | null;
   /** 拖入引用 / callout 时套用的引用前缀（如 `> ` / `>> `），null 表示不嵌套引用 */
   quotePrefix: string | null;
+  /** H4 贴边分栏：-1 贴目标块左边缘（拖动块作左栏），1 贴右边缘（作右栏），null 未命中 */
+  edgeSide: -1 | 1 | null;
+  /** H4 贴边目标块首行（onMouseUp 时重新取块，拖拽期间文档不变、行号稳定） */
+  edgeTargetStart: number | null;
   startY: number;
   startX: number;
   lastX: number;
@@ -33,6 +37,7 @@ export class DragController {
   private state: DragState | null = null;
   private ghostEl: HTMLElement | null = null;
   private indicatorEl: HTMLElement | null = null;
+  private edgeLineEl: HTMLElement | null = null;
 
   constructor(private ctx: BlockEditorPlugin) {}
 
@@ -42,6 +47,12 @@ export class DragController {
     indicator.style.display = 'none';
     document.body.appendChild(indicator);
     this.indicatorEl = indicator;
+    // H4 贴边分栏竖线（横向插入线之上，视觉区分：竖线 = 贴边合成）
+    const edgeLine = document.createElement('div');
+    edgeLine.className = 'block-editor-edge-line';
+    edgeLine.style.display = 'none';
+    document.body.appendChild(edgeLine);
+    this.edgeLineEl = edgeLine;
   }
 
   destroy(): void {
@@ -49,6 +60,8 @@ export class DragController {
     this.removeGhost();
     this.indicatorEl?.remove();
     this.indicatorEl = null;
+    this.edgeLineEl?.remove();
+    this.edgeLineEl = null;
     this.state = null;
     document.body.classList.remove('block-editor-dragging');
   }
@@ -89,6 +102,8 @@ export class DragController {
       targetLine: null,
       nestCol: null,
       quotePrefix: null,
+      edgeSide: null,
+      edgeTargetStart: null,
       startY: e.clientY,
       startX: e.clientX,
       lastX: e.clientX,
@@ -111,6 +126,7 @@ export class DragController {
     this.ctx.handle.setDragging(false);
     document.body.classList.remove('block-editor-dragging');
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
+    if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
 
     if (!ds.moved) {
       // 视为点击 -> 打开块菜单
@@ -122,6 +138,16 @@ export class DragController {
         type: ds.type,
       });
       return;
+    }
+
+    // H4 贴边快速分栏：松手时若仍命中贴边热区（同文档），直接把拖动块与
+    // 目标块合成两栏分栏；合成失败（目标已变 / 结构异常）回退普通移动。
+    if (ds.edgeSide !== null && ds.edgeTargetStart !== null && ds.targetEditor === null) {
+      const t = this.ctx.detector.getBlockAtLine(ds.editor, ds.edgeTargetStart);
+      if (t && this.ctx.converter.wrapToEdgeColumns(ds.editor, ds.ranges, t, ds.edgeSide)) {
+        this.ctx.handle.hideHandle();
+        return;
+      }
     }
 
     if (ds.targetLine != null) {
@@ -164,8 +190,9 @@ export class DragController {
     // 任意方向位移超过 4px 即进入拖拽；已离开源编辑器也算（跨分屏拖拽几乎纯横向，
     // 旧逻辑只看纵向位移，导致分屏拖拽永远无法启动、松手被当成点击弹菜单）
     if (!ds.moved) {
+      // M4：拖拽阈值取设置值（默认 4px），小于阈值视为点击（打开块菜单）
       const dist = Math.hypot(e.clientX - ds.startX, e.clientY - ds.startY);
-      ds.moved = dist > 4 || this.isOutsideSourceEditor(ds, e.clientX, e.clientY);
+      ds.moved = dist > (this.ctx.settings.dragThreshold || 4) || this.isOutsideSourceEditor(ds, e.clientX, e.clientY);
       if (ds.moved) this.ghostEl = this.createGhost(ds);
     }
     if (!ds.moved) return;
@@ -231,6 +258,28 @@ export class DragController {
     let quotePrefix: string | null = null;
     const overSelf = !cross && ds.ranges.some((r) => lineIndex >= r.start && lineIndex <= r.end);
     const target = overSelf ? null : this.ctx.detector.getBlockAtLine(editor, lineIndex);
+
+    // H4 贴边分栏热区：水平方向命中目标块左 / 右边缘 ≤ EDGE（20px）时启用。
+    // 与下方缩进热区（要求 x > 行文本起点 + 24px）几何互斥、优先级明确：
+    // 贴边命中后直接 return，不再走嵌套缩进判定，避免「贴边」与「嵌套」误触发。
+    if (target && !cross && this.isEdgeColumnTarget(editor, target)) {
+      const EDGE = 20;
+      const dl = x - lineCoords.left;
+      const dr = lineCoords.right - x;
+      const side: -1 | 1 | null =
+        dl >= -2 && dl <= EDGE && dl <= dr ? -1 : dr >= -2 && dr <= EDGE ? 1 : null;
+      if (side !== null) {
+        ds.edgeSide = side;
+        ds.edgeTargetStart = target.start;
+        ds.targetLine = null;
+        ds.nestCol = null;
+        ds.quotePrefix = null;
+        ds.targetEditor = null;
+        this.showEdgeLine(cm, doc, target, side);
+        return;
+      }
+    }
+
     if (target && ['list', 'quote', 'callout'].includes(target.type)) {
       // 分栏外壳不作为嵌套目标：拖到外壳行会截断分栏结构
       const nestable = COL_SHELL_RE.test(editor.getLine(target.start)) ? null : target;
@@ -347,10 +396,36 @@ export class DragController {
 
   private clearDropTarget(ds: DragState): void {
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
+    if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
     ds.targetEditor = null;
+    ds.edgeSide = null;
+    ds.edgeTargetStart = null;
+  }
+
+  /** 贴边分栏目标判定：目标不能是分栏外壳，也不能在分栏内部（避免截断结构） */
+  private isEdgeColumnTarget(editor: Editor, target: BlockRange): boolean {
+    if (COL_SHELL_RE.test(editor.getLine(target.start))) return false;
+    return !this.ctx.converter.insideColumns(editor, target);
+  }
+
+  /** 绘制贴边竖线：覆盖目标块整块高度；side=-1 贴左边缘，1 贴右边缘 */
+  private showEdgeLine(cm: CMView, doc: CMDoc, target: BlockRange, side: -1 | 1): void {
+    const startPos = doc.line(target.start + 1).from;
+    const endPos = doc.line(target.end + 1).to;
+    const rc1 = cm.coordsAtPos(startPos);
+    const rc2 = cm.coordsAtPos(endPos);
+    if (!rc1 || !rc2) return;
+    if (this.indicatorEl) this.indicatorEl.style.display = 'none';
+    if (this.edgeLineEl) {
+      const x = side === -1 ? rc1.left : rc2.right;
+      this.edgeLineEl.style.display = 'block';
+      this.edgeLineEl.style.left = x + 'px';
+      this.edgeLineEl.style.top = rc1.top + 'px';
+      this.edgeLineEl.style.height = Math.max(2, rc2.bottom - rc1.top) + 'px';
+    }
   }
 
   // 拖拽时跟随鼠标的浮动预览

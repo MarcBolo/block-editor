@@ -115,6 +115,44 @@ export class BlockIdService {
     });
   }
 
+  // M2：光标所在块生成块 ID，并在块后插入独立嵌入块 `![[笔记名#^id]]`，
+  // 复用 Obsidian 原生嵌入渲染（块 ID 独立成行时嵌入行落在其后方）。
+  embedCurrentBlock(editor: Editor): void {
+    const cursor = editor.getCursor();
+    const block = this.ctx.detector.getBlockAtLine(editor, cursor.line);
+    if (!block) {
+      new Notice('这一行没有可操作的块');
+      return;
+    }
+    const file = this.ctx.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice('无法定位当前文件');
+      return;
+    }
+    const id = this.ensureBlockId({
+      editor,
+      file,
+      start: block.start,
+      end: block.end,
+      type: block.type,
+    });
+    // 嵌入行落在块后：结构化块的 ID 独立成行时取该行，否则取块末行
+    const anchor =
+      this.needsOwnLine({ editor, file, start: block.start, end: block.end, type: block.type }) &&
+      this.findOwnLineIdLine(editor, block.end) !== null
+        ? (this.findOwnLineIdLine(editor, block.end) as number)
+        : block.end;
+    const link = `![[${file.basename}#^${id}]]`;
+    editor.replaceRange('\n' + link + '\n', {
+      line: anchor,
+      ch: editor.getLine(anchor).length,
+    });
+    editor.setCursor({ line: anchor + 1, ch: link.length });
+    editor.focus();
+    this.ctx.handle.hideHandle();
+    new Notice(`已插入嵌入块 #^${id}`);
+  }
+
   // 清掉全文的块 ID（独立成行的和句尾的），破坏性操作先确认
   clearBlockIds(editor: Editor): void {
     let removed = 0;

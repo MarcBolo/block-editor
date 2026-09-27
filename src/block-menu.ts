@@ -3,6 +3,7 @@ import type { Editor } from 'obsidian';
 import type { BlockContext, TurnIntoType } from './types';
 import type BlockEditorPlugin from './main';
 import { CALLOUT_TYPES, CODE_LANGS, TURN_INTO } from './constants';
+import { openBlockColorPicker } from './block-color';
 import { getCM } from './util';
 
 /** 菜单项偏多，加此类后由 styles.css 排成两列，降低菜单高度 */
@@ -64,9 +65,37 @@ export class BlockMenuController {
     menu.addSeparator();
     if (this.ctx.converter.isColumnsBlock(editor, block)) {
       menu.addItem((mi) => mi.setTitle('添加一栏').onClick(() => this.ctx.converter.addColumn(block)));
+      menu.addItem((mi) => mi.setTitle('追加一行').onClick(() => this.ctx.converter.appendColumnRow(block)));
       menu.addItem((mi) => mi.setTitle('取消分栏').onClick(() => this.ctx.converter.unwrapColumns(block)));
     } else if (this.ctx.converter.insideColumns(editor, block)) {
-      // 分栏内部块：不允许再套分栏，否则插入点落在原分栏区间中部会截断结构
+      // 分栏内部块：分栏行列编辑（拆分/合并/插入/行排序），不允许再套分栏
+      const colState = this.ctx.converter.columnsMenuState(editor, block);
+      const canMerge = !!colState && colState.canMerge;
+      const multiRow = !!colState && colState.rows.length > 1;
+      menu.addItem((mi) => mi.setTitle('拆分一栏').onClick(() => this.ctx.converter.splitColumn(block)));
+      menu.addItem((mi) =>
+        mi
+          .setTitle('合并右栏')
+          .setDisabled(!canMerge)
+          .onClick(() => this.ctx.converter.mergeColumn(block))
+      );
+      menu.addItem((mi) => mi.setTitle('插入一栏').onClick(() => this.ctx.converter.insertColumn(block)));
+      if (multiRow) {
+        menu.addSeparator();
+        menu.addItem((mi) =>
+          mi
+            .setTitle('行上移')
+            .setDisabled(!colState || !colState.canUp)
+            .onClick(() => this.ctx.converter.moveColumnRow(block, -1))
+        );
+        menu.addItem((mi) =>
+          mi
+            .setTitle('行下移')
+            .setDisabled(!colState || !colState.canDown)
+            .onClick(() => this.ctx.converter.moveColumnRow(block, 1))
+        );
+      }
+      menu.addSeparator();
       menu.addItem((mi) =>
         mi
           .setTitle('添加分栏')
@@ -88,6 +117,28 @@ export class BlockMenuController {
           .setTitle('组合为分栏')
           .setDisabled(this.ctx.converter.columnsSegmentCount(block) < 2)
           .onClick(() => this.ctx.converter.wrapBlockToColumns(block))
+      );
+    }
+
+    menu.addSeparator();
+    // H5 任意块颜色标记：设置 / 更改 / 清除（浮层定位取菜单项点击位置）
+    const hasColor = this.ctx.converter.blockColorOf(block) !== null;
+    menu.addItem((mi) =>
+      mi.setTitle(hasColor ? '更改颜色标记' : '设置颜色标记').onClick((ev) => {
+        openBlockColorPicker({
+          x: (ev as MouseEvent).clientX,
+          y: (ev as MouseEvent).clientY,
+          current: this.ctx.converter.blockColorOf(block),
+          onPick: (color) => {
+            if (color === null) this.ctx.converter.clearBlockColor(block);
+            else if (color !== this.ctx.converter.blockColorOf(block)) this.ctx.converter.setBlockColor(block, color);
+          },
+        });
+      })
+    );
+    if (hasColor) {
+      menu.addItem((mi) =>
+        mi.setTitle('清除颜色标记').onClick(() => this.ctx.converter.clearBlockColor(block))
       );
     }
 

@@ -1,7 +1,7 @@
 import type { Editor } from 'obsidian';
 import type { BlockContext, BlockRange } from './types';
 import type BlockEditorPlugin from './main';
-import { HANDLE_H, HANDLE_W } from './constants';
+import { HANDLE_W } from './constants';
 import { getCM, getEditorFromContent } from './util';
 
 /** Notion 式块手柄：悬停显示、光标跟随、拖拽入口 */
@@ -137,12 +137,14 @@ export class HandleController {
     }
 
     const lineH = coords.bottom - coords.top || 20;
-    const top = coords.top + (lineH - HANDLE_H) / 2;
+    // M4：手柄尺寸取设置值（缺省回退常量 20），与 styles.css 的 --be-handle-size 保持一致
+    const handleSize = this.ctx.settings.handleSize || HANDLE_W;
+    const top = coords.top + (lineH - handleSize) / 2;
 
     if (this.handleEl) {
       this.handleEl.style.display = 'flex';
       this.handleEl.style.top = top + 'px';
-      this.handleEl.style.left = coords.left - HANDLE_W - 6 + 'px';
+      this.handleEl.style.left = coords.left - handleSize - 6 + 'px';
     }
     this.showHighlight(editor, block);
   }

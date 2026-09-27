@@ -1,7 +1,9 @@
 import { Notice, MarkdownView, Modal } from 'obsidian';
-import type { App } from 'obsidian';
+import type { App, Editor } from 'obsidian';
+import type { BlockContext } from './types';
 import type BlockEditorPlugin from './main';
 import { TURN_INTO } from './constants';
+import { openBlockColorPicker } from './block-color';
 import { getColumnsDiagnostics } from './columns-preview';
 import { getCM } from './util';
 
@@ -62,6 +64,11 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
     editorCallback: (editor) => plugin.ids.copyCurrentBlockLink(editor),
   });
   plugin.addCommand({
+    id: 'embed-block',
+    name: '嵌入当前块',
+    editorCallback: (editor) => plugin.ids.embedCurrentBlock(editor),
+  });
+  plugin.addCommand({
     id: 'duplicate-block',
     name: '重复当前块',
     editorCallback: (editor) => plugin.ops.duplicateCurrentBlock(editor),
@@ -118,4 +125,49 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
       editorCallback: (editor) => plugin.converter.convertCurrentBlock(editor, id),
     });
   }
+
+  // H5 任意块颜色标记：设置 / 清除（命令面板无鼠标坐标，浮层定位到编辑器视口中央）
+  const currentBlockOf = (editor: Editor): BlockContext | null => {
+    const cursor = editor.getCursor();
+    const block = plugin.detector.getBlockAtLine(editor, cursor.line);
+    if (!block) {
+      new Notice('这一行没有可操作的块');
+      return null;
+    }
+    return {
+      editor,
+      file: plugin.app.workspace.getActiveFile(),
+      start: block.start,
+      end: block.end,
+      type: block.type,
+    };
+  };
+  plugin.addCommand({
+    id: 'set-block-color',
+    name: '设置当前块颜色标记',
+    editorCallback: (editor) => {
+      const b = currentBlockOf(editor);
+      if (!b) return;
+      const cm = getCM(editor);
+      const rect = cm?.dom.getBoundingClientRect();
+      openBlockColorPicker({
+        x: (rect?.left ?? 0) + 320,
+        y: (rect?.top ?? 0) + 160,
+        current: plugin.converter.blockColorOf(b),
+        onPick: (color) => {
+          if (color === null) plugin.converter.clearBlockColor(b);
+          else if (color !== plugin.converter.blockColorOf(b)) plugin.converter.setBlockColor(b, color);
+        },
+      });
+    },
+  });
+  plugin.addCommand({
+    id: 'clear-block-color',
+    name: '清除当前块颜色标记',
+    editorCallback: (editor) => {
+      const b = currentBlockOf(editor);
+      if (!b) return;
+      plugin.converter.clearBlockColor(b);
+    },
+  });
 }
