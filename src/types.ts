@@ -39,13 +39,7 @@ export type TurnIntoType =
   | 'mermaid'
   | 'math'
   | 'table'
-  | 'divider'
-  // M5 转换类型扩展：常用代码语言作为「转换为」目标（等同于 code 换语言）
-  | 'html'
-  | 'css'
-  | 'js'
-  | 'json'
-  | 'yaml';
+  | 'divider';
 
 export type BlockType = DetectedBlockType | TurnIntoType;
 
@@ -63,6 +57,14 @@ export interface BlockContext extends BlockRange {
 }
 
 export type TurnIntoItem = [TurnIntoType, string];
+
+/** 斜杠「插入类」动作 id：只插入内容，不改变块类型 */
+export type InsertActionId = 'image' | 'audio' | 'video' | 'pdf';
+
+/** 斜杠建议的统一条目：转换块类型 / 插入内容 */
+export type SlashItem =
+  | { kind: 'turn'; id: TurnIntoType; title: string }
+  | { kind: 'insert'; id: InsertActionId; title: string };
 
 /** 本插件实际用到的 CM6 EditorView 表面 */
 export interface CMLine {

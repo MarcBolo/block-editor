@@ -7,11 +7,18 @@ import { BlockOps } from './ops';
 import { BlockMenuController } from './block-menu';
 import { HandleController } from './handle';
 import { DragController } from './drag';
-import { SlashSuggest } from './slash-suggest';
-import { columnsExtension, flushEditingColumns } from './columns-preview';
+import { SlashSuggest, BlockInserter } from './slash-suggest';
+import {
+  columnsExtension,
+  flushEditingColumns,
+  installColumnsFormatBridge,
+  uninstallColumnsFormatBridge,
+} from './columns-preview';
 import { blockColorExtension, applyBlockColorToDom } from './block-color';
 import { parseColBgMeta, setColBgVars } from './col-bg';
 import { registerCommands } from './commands';
+import { invalidateNotesWithBlocks } from './picker';
+import { installLinkOpenBridge, uninstallLinkOpenBridge } from './link-open';
 import { BlockEditorSettingTab, DEFAULT_SETTINGS, applyColumnsCssVars } from './settings';
 import type { BlockEditorSettings } from './settings';
 
@@ -25,6 +32,7 @@ export default class BlockEditorPlugin extends Plugin {
   menu = new BlockMenuController(this);
   handle = new HandleController(this);
   drag = new DragController(this);
+  inserter = new BlockInserter(this);
 
   async onload(): Promise<void> {
     console.log('[block-editor]', this.manifest.version, 'onload');
@@ -32,6 +40,9 @@ export default class BlockEditorPlugin extends Plugin {
     document.body.classList.toggle('be-columns-live-on', this.settings.livePreviewWidget);
     // M4：设置默认外观 / 手柄尺寸落到 body CSS 变量（阅读模式原生渲染同样消费）
     applyColumnsCssVars(this.settings);
+
+    // 链接打开位置：闭包读取设置 ⇒ 改设置即时生效，无需重装桥接
+    installLinkOpenBridge(this.app, () => this.settings.linkOpenMode);
 
     this.handle.init();
     this.drag.init();
@@ -50,12 +61,6 @@ export default class BlockEditorPlugin extends Plugin {
     //   一致时按权重式 flex 设置（与实时预览 ColumnsWidget 一致）。
     this.registerMarkdownPostProcessor((el) => {
       // H5 任意块颜色标记回放：独立于分栏 widget 开关（%% block-color:<color> %%）
-      // 诊断日志：postProcessor 入口，记录每个回调的 root 块元素信息
-      console.log('[be-block-color]', '[postProcessor]', {
-        root: el.tagName,
-        rootClass: typeof el.className === 'string' ? el.className : '',
-        childCount: el.childNodes.length,
-      });
       applyBlockColorToDom(el);
       // 开关关闭时阅读模式不叠加自定义回放（栏宽 / 背景色 / 外观参数），
       // 与实时预览 widget 的开关行为保持一致：关闭 = 原生 callout 展示
@@ -199,28 +204,54 @@ export default class BlockEditorPlugin extends Plugin {
         if (sel && sel.editor === editor) this.selection.clearSelection();
       })
     );
-    // 换文件 / 切换叶子前，把编辑中的分栏内容写回文档（blur 可能不触发）
+    // 换文件 / 切换叶子前，把编辑中的分栏内容写回文档（blur 可能不触发），
+    // 并清除绑定在上一页的浮层（手柄 / 光标块高亮 / 多选高亮）。
+    // active-leaf-change 覆盖切换标签页；file-open 覆盖在同一叶子内点击链接
+    // 跳转到其他笔记的场景（此时活动叶子未变，不会触发 active-leaf-change）。
+    const onActiveDocumentChange = (): void => {
+      flushEditingColumns();
+      this.selection.clearSelection();
+      // 先清除上一页残留的手柄 / 高亮浮层（不随页面切换自动移除），
+      // 再按新页面光标块重定位；新编辑器未获焦时保持隐藏。
+      this.handle.hideHandle();
+      this.handle.updateCursorBlock();
+    };
+    this.registerEvent(this.app.workspace.on('active-leaf-change', onActiveDocumentChange));
+    // file-open 在任意叶子打开文件时都会触发：后台叶子打开文件（当前活动文件
+    // 未变）不应打断正在进行的栏内编辑，仅在打开的就是当前活动文件时才处理。
     this.registerEvent(
-      this.app.workspace.on('active-leaf-change', () => {
-        flushEditingColumns();
-        this.selection.clearSelection();
-        this.handle.updateCursorBlock();
+      this.app.workspace.on('file-open', (file) => {
+        if (this.app.workspace.getActiveFile()?.path !== file?.path) return;
+        onActiveDocumentChange();
       })
     );
     // 应用退出前兜底写回一次
     this.registerEvent(this.app.workspace.on('quit', () => flushEditingColumns()));
+    // 笔记内容变更后，「含块 ID 的笔记」缓存失效，下次重新扫描
+    this.registerEvent(this.app.vault.on('modify', () => invalidateNotesWithBlocks()));
+    this.registerEvent(this.app.vault.on('create', () => invalidateNotesWithBlocks()));
+    this.registerEvent(this.app.vault.on('delete', () => invalidateNotesWithBlocks()));
 
     this.addSettingTab(new BlockEditorSettingTab(this));
+
+    // 分栏编辑态格式命令桥接：Mod+B / 右键「文本格式」等重定向到分栏 textarea，
+    // 避免标记语法写到分栏外。Editor 原型随视图创建，切换文档时幂等补装一次。
+    installColumnsFormatBridge(this.app);
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () => installColumnsFormatBridge(this.app))
+    );
   }
 
   onunload(): void {
     flushEditingColumns();
+    uninstallColumnsFormatBridge();
+    uninstallLinkOpenBridge();
     this.drag.destroy();
     this.handle.destroy();
     this.selection.destroy();
   }
 
-async loadSettings(): Promise<void> {
+  async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
 
@@ -242,3 +273,5 @@ export {
   parseBlockColorValue,
 } from './block-color';
 export { BlockConverter } from './convert';
+export { buildSlashItems, BlockInserter } from './slash-suggest';
+export { scanBlockIds } from './picker';

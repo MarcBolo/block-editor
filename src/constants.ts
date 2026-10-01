@@ -1,4 +1,4 @@
-import type { TurnIntoItem } from './types';
+import type { InsertActionId, TurnIntoItem } from './types';
 
 export const HANDLE_W = 20;
 export const HANDLE_H = 20;
@@ -23,12 +23,6 @@ export const TURN_INTO: TurnIntoItem[] = [
   ['math', '数学公式'],
   ['table', '表格'],
   ['divider', '分割线'],
-  // M5：常用代码语言可直接作为块类型（转出即代码块 + 语言标记）
-  ['html', 'HTML 代码'],
-  ['css', 'CSS 代码'],
-  ['js', 'JavaScript 代码'],
-  ['json', 'JSON 数据'],
-  ['yaml', 'YAML 数据'],
 ];
 
 /** 块 ID 的词表：Obsidian 只认拉丁字母、数字和连字符，所以用「易拼写的短单词 + 序号」 */
@@ -108,3 +102,19 @@ export const CODE_LANGS: [string, string][] = [
   ['less', 'Less'],
   ['graphql', 'GraphQL'],
 ];
+
+/** 斜杠「插入类」动作（与 TURN_INTO 合并进斜杠建议列表） */
+export const INSERT_ACTIONS: [InsertActionId, string][] = [
+  ['image', '图片'],
+  ['audio', '音频'],
+  ['video', '视频'],
+  ['pdf', 'PDF'],
+];
+
+/** 媒体选择器的扩展名白名单（小写、不含点） */
+export const MEDIA_EXTS: Record<'image' | 'audio' | 'video' | 'pdf', string[]> = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif'],
+  audio: ['mp3', 'wav', 'm4a', 'ogg', 'flac'],
+  video: ['mp4', 'webm', 'mov', 'mkv', 'avi'],
+  pdf: ['pdf'],
+};

@@ -60,13 +60,27 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
   });
   plugin.addCommand({
     id: 'copy-block-link',
-    name: '复制当前块链接',
+    name: '生成块 ID',
     editorCallback: (editor) => plugin.ids.copyCurrentBlockLink(editor),
   });
   plugin.addCommand({
-    id: 'embed-block',
-    name: '嵌入当前块',
-    editorCallback: (editor) => plugin.ids.embedCurrentBlock(editor),
+    id: 'reference-block',
+    name: '引用其他块…',
+    editorCallback: (editor) => {
+      const cursor = editor.getCursor();
+      const block = plugin.detector.getBlockAtLine(editor, cursor.line);
+      if (!block) {
+        new Notice('这一行没有可操作的块');
+        return;
+      }
+      plugin.ids.referenceOtherBlock({
+        editor,
+        file: plugin.app.workspace.getActiveFile(),
+        start: block.start,
+        end: block.end,
+        type: block.type,
+      });
+    },
   });
   plugin.addCommand({
     id: 'duplicate-block',
@@ -144,7 +158,7 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
   };
   plugin.addCommand({
     id: 'set-block-color',
-    name: '设置当前块颜色标记',
+    name: '设置块颜色',
     editorCallback: (editor) => {
       const b = currentBlockOf(editor);
       if (!b) return;
@@ -163,7 +177,7 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
   });
   plugin.addCommand({
     id: 'clear-block-color',
-    name: '清除当前块颜色标记',
+    name: '清除块颜色',
     editorCallback: (editor) => {
       const b = currentBlockOf(editor);
       if (!b) return;

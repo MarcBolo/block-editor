@@ -1,5 +1,5 @@
 import { Decoration, EditorView, ViewPlugin, WidgetType } from '@codemirror/view';
-import type { DecorationSet } from '@codemirror/view';
+import type { DecorationSet, ViewUpdate } from '@codemirror/view';
 import { Prec, StateEffect, StateField } from '@codemirror/state';
 import type { Extension, Range, Transaction } from '@codemirror/state';
 import { MarkdownRenderer, editorInfoField, editorLivePreviewField } from 'obsidian';
@@ -8,14 +8,19 @@ import type BlockEditorPlugin from './main';
 import { buildColumnsMarkdown } from './convert';
 import { deriveDarkColor, parseColBgMeta, setColBgVars } from './col-bg';
 import type { ColBg } from './col-bg';
-import { getCM } from './util';
-import { guardDecorations, safeDecoCompute } from './cm6-deco-guard';
+import { getCM, keepViewport } from './util';
+import { safeDecoCompute } from './cm6-deco-guard';
 
 const DEBUG = false;
 /** 调试日志：控制台按 BE-columns 过滤 */
 function colLog(...args: unknown[]): void {
   if (DEBUG) console.log('%c[BE-columns]', 'color:#8b5cf6;font-weight:bold', ...args);
 }
+
+/** 代码围栏起始行（``` 或 ~~~，3 个及以上）；围栏状态机与扫描循环共用，避免逐行重复构造 */
+const FENCE_RE = /^\s*(`{3,}|~{3,})/;
+/** hex 颜色（#rgb / #rrggbb / #rrggbbaa），选色输入校验用 */
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 /** 处于编辑态的 widget 集合：切换标签页 / 关闭文档时 blur 可能不触发，需兜底写回 */
 const editingWidgets = new Set<ColumnsWidget>();
@@ -27,6 +32,320 @@ export function flushEditingColumns(): void {
     editingWidgets.delete(w);
   }
 }
+
+/* ===== 分栏编辑态 ⇄ Obsidian 编辑器命令 桥接 =====
+ *
+ * 问题：在分栏中做文本编辑操作时，动作不会落到分栏，而是落到分栏外面的文档：
+ *   - 快捷键 / 右键「文本格式」加粗、高亮等：标记语法写到分栏外（分栏下一行）；
+ *   - 右键「剪切 / 粘贴」：内容被 CM 编辑器接管（落到文档而非分栏）；
+ *   - 右键「全选」：选中整篇文档而不是分栏内容。
+ *
+ * 根因：分栏编辑态是普通 <textarea>，而它位于 CM6 的 .cm-content 内部：
+ *   1) 格式命令：快捷键与「文本格式」菜单最终都调用 Obsidian 的
+ *      Editor.toggleMarkdownFormatting(format)，该方法作用于 CM 编辑器选区，
+ *      而 textarea 的文本并不在 CM 文档里 → 语法落到分栏外。
+ *   2) 剪切/粘贴：Obsidian 在 window 上监听 paste/cut，其"原生编辑元素"判定
+ *      只覆盖 <input> 与 contentEditable（<textarea> 不在列），于是从 textarea
+ *      冒泡上去的剪贴板事件被接管，作用到 CM 编辑器。
+ *   3) 全选：菜单项由 Editor.setSelection(整篇范围) 实现，同样作用于 CM 编辑器。
+ *
+ * 修复：把这几条路径分别在各自收敛点重定向到分栏 textarea——
+ *   1) Editor.toggleMarkdownFormatting → 改写 textarea 选区（标记对）；
+ *   2) textarea 上的 copy/cut/paste 事件 stopPropagation（仅阻止向上冒泡，
+ *      不 preventDefault），交回浏览器对 textarea 的原生剪贴板行为；
+ *   3) Editor.setSelection 收到"整篇范围"请求时改为选中 textarea 全文；
+ *   4) 命令型 API（getSelection / replaceSelection / replaceRange / getRange /
+ *      getCursor / setCursor / posToOffset / offsetToPos / somethingSelected）→
+ *      落到 textarea，使第三方插件的"插入模板 / 包裹选区"等增强命令作用于分栏。
+ * 上述补丁作用于 Editor 原型（全局）：均按「调用方即该栏所属编辑器」收敛，
+ * 其他分屏编辑器的同名调用不受影响、回落原实现。
+ * 编辑态结束时解除目标，行为恢复为原生。
+ * 不支持：补全 / 联想类（EditorSuggest 与 CM6 扩展需要真实编辑器视图）、以及
+ * 直接用 editor.cm 操作 CM6 的插件——textarea 没有 CM6 运行时，无法桥接。 */
+
+/** 当前正在编辑的分栏 textarea 及其所属 Obsidian 编辑器（进入编辑态登记，
+ *  退出/失焦注销）。Editor 原型补丁是全局的：必须记下所属编辑器，使桥接只对
+ *  该编辑器的调用生效，否则其他分屏的编辑器调用同名 API 会被误重定向进本栏。 */
+let columnEditTarget: { ta: HTMLTextAreaElement; owner: unknown } | null = null;
+
+/** 登记 / 注销分栏编辑目标（由 ColumnsWidget 的编辑态生命周期调用）；
+ *  owner 为该栏所属的 Obsidian 编辑器实例；取不到时传 null（不按所属收敛）。 */
+export function setColumnEditTarget(ta: HTMLTextAreaElement | null, owner: unknown = null): void {
+  columnEditTarget = ta ? { ta, owner } : null;
+}
+
+/** 当前可用的分栏编辑目标（已脱离 DOM 的旧实例视为无效） */
+function activeColumnTarget(): { ta: HTMLTextAreaElement; owner: unknown } | null {
+  const t = columnEditTarget;
+  return t && t.ta.isConnected ? t : null;
+}
+
+/** 调用方是否就是登记该栏的编辑器。owner 未知（null）时一律接管，
+ *  保证取不到归属信息时功能不退化。 */
+function isTargetEditor(target: { owner: unknown }, self: unknown): boolean {
+  return target.owner == null || target.owner === self;
+}
+
+/** textarea 原生编辑事件守卫：阻止 copy/cut/paste 与 Mod+A 冒泡到编辑器层。
+ *  仅 stopPropagation（不 preventDefault），浏览器对 textarea 的原生剪贴板 /
+ *  全选行为不受影响。 */
+function guardTextareaEditing(ta: HTMLTextAreaElement): void {
+  for (const type of ['copy', 'cut', 'paste']) {
+    ta.addEventListener(type, (e) => e.stopPropagation());
+  }
+  ta.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'a') e.stopPropagation();
+  });
+}
+
+/** 编辑态 textarea 行数跟随内容：textarea 不原生自适应，`rows` 决定其固有高度。
+ *  作为未挂载（拿不到 scrollHeight）时的兜底固有高度。 */
+function syncTextareaRows(ta: HTMLTextAreaElement): void {
+  const lines = Math.max(2, ta.value.split('\n').length);
+  if (ta.rows !== lines) ta.rows = lines;
+}
+
+/** 让编辑态 textarea 高度贴合内容（textarea 不原生自适应）。
+ *  分栏是 column flex 容器、textarea 用 flex:0 0 auto，故这里的显式高度即是
+ *  该栏的高度来源，进而决定整行（row）高度——保证编辑态整块以内容最多的栏为准，
+ *  而不是被 min-height 截成约 3 行。未挂载时拿不到 scrollHeight，跳过（此时
+ *  由 syncTextareaRows 的固有高度兜底）。 */
+function autosizeTextarea(ta: HTMLTextAreaElement): void {
+  if (!ta.isConnected) return;
+  ta.style.height = 'auto';
+  const h = ta.scrollHeight;
+  // 无排版环境（如 jsdom / 元素不可见）scrollHeight 为 0：保持 auto，由 rows 决定固有高度
+  if (h > 0) ta.style.height = h + 'px';
+}
+
+/** format 参数（与 Obsidian 编辑器命令一致）→ 行内标记对 */
+const FORMAT_MARKERS: Record<string, [string, string]> = {
+  bold: ['**', '**'],
+  italic: ['*', '*'],
+  strikethrough: ['~~', '~~'],
+  highlight: ['==', '=='],
+  code: ['`', '`'],
+  comment: ['%%', '%%'],
+};
+
+/** 把标记对应用到 textarea 选区：已包裹则取消；有选区则包裹；无选区插入并把光标放中间 */
+function applyMarkerToTextarea(ta: HTMLTextAreaElement, open: string, close: string): void {
+  // 显示值中的行内标记可能是不可见字符（sentinel）：先还原为真实字符再判断/包裹
+  // （等长替换，选区下标不变）；收尾再按光标位置重新隐藏
+  const v = desentinelize(ta.value);
+  const s = ta.selectionStart;
+  const e = ta.selectionEnd;
+  const sel = v.slice(s, e);
+  if (sel.length >= open.length + close.length && sel.startsWith(open) && sel.endsWith(close)) {
+    const inner = sel.slice(open.length, sel.length - close.length);
+    ta.value = v.slice(0, s) + inner + v.slice(e);
+    ta.selectionStart = s;
+    ta.selectionEnd = s + inner.length;
+  } else if (sel) {
+    ta.value = v.slice(0, s) + open + sel + close + v.slice(e);
+    ta.selectionStart = s + open.length;
+    ta.selectionEnd = e + open.length;
+  } else {
+    ta.value = v.slice(0, s) + open + close + v.slice(e);
+    ta.selectionStart = ta.selectionEnd = s + open.length;
+  }
+  // 复用 textarea 的 input 监听同步 widget 内存文本（文档写回仍在失焦时进行）
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  ta.focus({ preventScroll: true });
+  syncMarkerDisplay(ta);
+}
+
+/** Obsidian 位置（line/ch，均 0 基）→ 文本偏移；越界钳制到文本末尾 */
+function posToOffsetIn(text: string, pos: { line?: number; ch?: number } | null | undefined): number {
+  if (!pos || typeof pos.line !== 'number') return 0;
+  const lines = text.split('\n');
+  const line = Math.max(0, Math.min(pos.line, lines.length - 1));
+  let off = 0;
+  for (let i = 0; i < line; i++) off += lines[i].length + 1;
+  const ch = typeof pos.ch === 'number' ? Math.max(0, Math.min(pos.ch, lines[line].length)) : 0;
+  return off + ch;
+}
+
+/** 文本偏移 → Obsidian 位置（line/ch，均 0 基） */
+function offsetToPosIn(text: string, offset: number): { line: number; ch: number } {
+  const off = Math.max(0, Math.min(offset, text.length));
+  const head = text.slice(0, off);
+  const line = (head.match(/\n/g) ?? []).length;
+  const ch = off - (head.lastIndexOf('\n') + 1);
+  return { line, ch };
+}
+
+/** 把 [from, to) 替换为 text 应用到栏内 textarea（命令型 API 桥接用）：
+ *  写入真实字符 + 光标落在插入内容之后 + 复用 input 监听同步内存文本与高度。 */
+function applyTextToTextarea(ta: HTMLTextAreaElement, from: number, to: number, text: string): void {
+  const v = desentinelize(ta.value);
+  const a = Math.max(0, Math.min(from, v.length));
+  const b = Math.max(a, Math.min(to, v.length));
+  ta.value = v.slice(0, a) + text + v.slice(b);
+  const caret = a + text.length;
+  ta.setSelectionRange(caret, caret);
+  // 复用 textarea 的 input 监听同步 widget 内存文本（文档写回仍在失焦时进行）
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  ta.focus({ preventScroll: true });
+  syncMarkerDisplay(ta);
+}
+
+/** 已打过补丁的 Editor 原型（避免重复包装同一原型） */
+const patchedEditorProtos = new WeakSet<object>();
+/** 原型补丁记录：卸载时用于还原，避免插件卸载后仍改写 Editor 原型行为 */
+const editorProtoPatches: {
+  proto: Record<string, unknown>;
+  origFormat: unknown;
+  origSetSelection: unknown;
+  patchedSetSelection: boolean;
+  /** 命令型 API 桥接的 {方法名, 原实现}，卸载时逐条还原 */
+  extra?: { name: string; orig: unknown }[];
+}[] = [];
+
+/** 桥接处理器返回该值 = 本次调用不归桥接管，交回原实现 */
+const BRIDGE_MISS = Symbol('column-bridge-miss');
+
+/** setSelection 请求是否恰为「全选整篇文档」（Obsidian 编辑器菜单「全选」的实现方式） */
+function isWholeDocSelection(editor: unknown, from: unknown, to: unknown): boolean {
+  const f = from as { line?: number; ch?: number } | null;
+  const t = to as { line?: number; ch?: number } | null;
+  if (!f || !t || f.line !== 0 || f.ch !== 0 || typeof t.line !== 'number') return false;
+  try {
+    const api = editor as { lineCount(): number; getLine(n: number): string };
+    const last = api.lineCount() - 1;
+    return t.line === last && t.ch === api.getLine(last).length;
+  } catch {
+    return false;
+  }
+}
+
+/** 安装编辑器命令桥接（幂等；需要有活动的编辑器实例才能取到原型） */
+export function installColumnsFormatBridge(app: App): void {
+  const editor = (app.workspace.activeEditor as { editor?: unknown } | null)?.editor;
+  if (!editor) return;
+  const proto = Object.getPrototypeOf(editor) as Record<string, unknown> | null;
+  if (!proto || patchedEditorProtos.has(proto)) return;
+  const origFormat = proto.toggleMarkdownFormatting;
+  if (typeof origFormat !== 'function') return;
+  proto.toggleMarkdownFormatting = function (this: unknown, format: string) {
+    const target = activeColumnTarget();
+    const marker = FORMAT_MARKERS[format];
+    if (target && marker && isTargetEditor(target, this)) {
+      applyMarkerToTextarea(target.ta, marker[0], marker[1]);
+      return;
+    }
+    return (origFormat as (f: string) => unknown).call(this, format);
+  };
+  // 右键菜单「全选」：编辑器收到"整篇范围"选区请求时改为选中分栏 textarea 全文
+  const origSetSelection = proto.setSelection;
+  const patchedSetSelection = typeof origSetSelection === 'function';
+  if (patchedSetSelection) {
+    proto.setSelection = function (this: unknown, from: unknown, to?: unknown) {
+      const target = activeColumnTarget();
+      if (target && isTargetEditor(target, this) && isWholeDocSelection(this, from, to)) {
+        target.ta.focus({ preventScroll: true });
+        target.ta.select();
+        return;
+      }
+      return (origSetSelection as (f: unknown, t?: unknown) => unknown).call(this, from, to);
+    };
+  }
+
+  // ===== 命令型 API 桥接 =====
+  // 第三方插件的「编辑增强」多经 Editor API 操作"当前编辑器"（插入模板、包裹选区、
+  // 定位改写等）。栏内编辑是普通 textarea，不是 CM6 视图，这些调用原本落到分栏外面
+  // 的文档上。此处把文本视图重定向到栏内 textarea（仅编辑态生效，未编辑时一律回落
+  // 原实现）；位置/偏移一律在"该栏文本"坐标系内解释。
+  // 边界：文档级 API（getValue/setValue/getLine/lineCount 等）不改，仍指向真实文档；
+  // 直接用 editor.cm（CM6 视图）或 EditorSuggest（补全/联想）的插件不走此桥。
+  const extra: { name: string; orig: unknown }[] = [];
+  const patchMethod = (
+    name: string,
+    fn: (ta: HTMLTextAreaElement, args: unknown[]) => unknown
+  ): void => {
+    const orig = proto[name];
+    if (typeof orig !== 'function') return;
+    proto[name] = function (this: unknown, ...args: unknown[]) {
+      const target = activeColumnTarget();
+      if (target && isTargetEditor(target, this)) {
+        const out = fn(target.ta, args);
+        if (out !== BRIDGE_MISS) return out;
+      }
+      return (orig as (...a: unknown[]) => unknown).apply(this, args);
+    };
+    extra.push({ name, orig });
+  };
+
+  patchMethod('getSelection', (ta) => desentinelize(ta.value.slice(ta.selectionStart, ta.selectionEnd)));
+  patchMethod('somethingSelected', (ta) => ta.selectionStart !== ta.selectionEnd);
+  patchMethod('replaceSelection', (ta, args) => {
+    const text = args[0];
+    if (typeof text !== 'string') return BRIDGE_MISS;
+    applyTextToTextarea(ta, ta.selectionStart, ta.selectionEnd, text);
+    return undefined;
+  });
+  patchMethod('replaceRange', (ta, args) => {
+    const text = args[0];
+    const from = args[1] as { line?: number; ch?: number } | null;
+    if (typeof text !== 'string' || !from) return BRIDGE_MISS;
+    const v = desentinelize(ta.value);
+    const a = posToOffsetIn(v, from);
+    const to = args[2] as { line?: number; ch?: number } | null;
+    applyTextToTextarea(ta, a, to ? posToOffsetIn(v, to) : a, text);
+    return undefined;
+  });
+  patchMethod('getRange', (ta, args) => {
+    const from = args[0] as { line?: number; ch?: number } | null;
+    const to = args[1] as { line?: number; ch?: number } | null;
+    if (!from || !to) return BRIDGE_MISS;
+    const v = desentinelize(ta.value);
+    const a = posToOffsetIn(v, from);
+    const b = posToOffsetIn(v, to);
+    return v.slice(Math.min(a, b), Math.max(a, b));
+  });
+  patchMethod('getCursor', (ta, args) => {
+    const which = args[0];
+    const off =
+      which === 'from' || which === 'anchor'
+        ? ta.selectionStart
+        : ta.selectionEnd; // 默认（含 'to' / 'head'）取选区末端
+    return offsetToPosIn(desentinelize(ta.value), off);
+  });
+  patchMethod('setCursor', (ta, args) => {
+    const v = desentinelize(ta.value);
+    const pos = args[0];
+    const ch = args[1];
+    const off =
+      typeof pos === 'number' && typeof ch === 'number'
+        ? posToOffsetIn(v, { line: pos, ch })
+        : posToOffsetIn(v, pos as { line?: number; ch?: number } | null);
+    ta.focus({ preventScroll: true });
+    ta.setSelectionRange(off, off);
+    syncMarkerDisplay(ta);
+    return undefined;
+  });
+  patchMethod('posToOffset', (ta, args) =>
+    posToOffsetIn(desentinelize(ta.value), args[0] as { line?: number; ch?: number } | null)
+  );
+  patchMethod('offsetToPos', (ta, args) =>
+    offsetToPosIn(desentinelize(ta.value), typeof args[0] === 'number' ? args[0] : 0)
+  );
+
+  patchedEditorProtos.add(proto);
+  editorProtoPatches.push({ proto, origFormat, origSetSelection, patchedSetSelection, extra });
+}
+
+/** 还原 installColumnsFormatBridge 对 Editor 原型的改写（插件卸载时调用） */
+export function uninstallColumnsFormatBridge(): void {
+  for (const p of editorProtoPatches) {
+    p.proto.toggleMarkdownFormatting = p.origFormat;
+    if (p.patchedSetSelection) p.proto.setSelection = p.origSetSelection;
+    for (const e of p.extra ?? []) p.proto[e.name] = e.orig;
+    patchedEditorProtos.delete(p.proto);
+  }
+  editorProtoPatches.length = 0;
+}
+
 
 /** 分栏外壳标记行（支持任意层引用前缀；宽度参数 `|NN-NN` 可选，缺失时均分） */
 const COL_START_RE = /^((?:>\s*)+)\[!multi-column(?:\|[^\]]*)?\][^\n]*$/;
@@ -174,11 +493,11 @@ function findOpenFence(
   for (let i = from; i < startLine; i++) {
     const text = doc.line(i + 1).text;
     if (fenceCh !== null) {
-      const m = text.match(/^\s*(`{3,}|~{3,})/);
+      const m = text.match(FENCE_RE);
       if (m && m[1][0] === fenceCh) fenceCh = null;
       continue;
     }
-    const f = text.match(/^\s*(`{3,}|~{3,})/);
+    const f = text.match(FENCE_RE);
     if (f) fenceCh = f[1][0];
   }
   return fenceCh;
@@ -216,11 +535,11 @@ function scanRegionsIn(
     for (let i = start + 1; i <= endLine; i++) {
       const text = doc.line(i + 1).text;
       if (divFence !== null) {
-        const m = text.match(/^\s*(`{3,}|~{3,})/);
+        const m = text.match(FENCE_RE);
         if (m && m[1][0] === divFence) divFence = null;
         continue;
       }
-      const f = text.match(/^\s*(`{3,}|~{3,})/);
+      const f = text.match(FENCE_RE);
       if (f) {
         divFence = f[1][0];
         continue;
@@ -262,11 +581,11 @@ function scanRegionsIn(
           const stripped = stripToColLevel(text, colDepth);
           if (segFence !== null) {
             lines.push(stripped);
-            const m = stripped.match(/^\s*(`{3,}|~{3,})/);
+            const m = stripped.match(FENCE_RE);
             if (m && m[1][0] === segFence) segFence = null;
             continue;
           }
-          const f = stripped.match(/^\s*(`{3,}|~{3,})/);
+          const f = stripped.match(FENCE_RE);
           if (f) segFence = f[1][0];
           lines.push(stripped);
         }
@@ -341,11 +660,11 @@ function scanRegionsIn(
     const text = doc.line(i + 1).text;
     if (stats && COL_LOOSE_RE.test(text)) stats.markerLines++;
     if (fenceCh !== null) {
-      const m = text.match(/^\s*(`{3,}|~{3,})/);
+      const m = text.match(FENCE_RE);
       if (m && m[1][0] === fenceCh) fenceCh = null;
       continue;
     }
-    const f = text.match(/^\s*(`{3,}|~{3,})/);
+    const f = text.match(FENCE_RE);
     if (f) {
       fenceCh = f[1][0];
       continue;
@@ -365,13 +684,265 @@ function scanRegionsIn(
   return regions;
 }
 
+/* ===== 单击定位：渲染快照点击坐标 → 源码字符偏移 =====
+ *
+ * 非编辑态是 MarkdownRenderer 输出的 HTML 快照（只读、无光标），编辑态是显示
+ * 原始 Markdown 的 <textarea>。两者排版不同（粗体、标题、列表会改变行高与横向
+ * 位置），因此"点击坐标 → 源码偏移"只能近似（原生 Obsidian 的精确落点依赖
+ * 可见面与可编辑面是同一个 CM6 视图）。做法：
+ *   1) 取点击处的文本节点与偏移；点到留白（非文本）或内容区外 → 不进编辑；
+ *   2) 去掉源码中的 Markdown 标记得到"纯文本投影"（带回源码下标映射），以点击点
+ *      附近的渲染文本为锚点在投影中定位，换算成源码偏移；
+ *   3) 锚点定位失败时按点击点在内容区中的垂直比例估源码行首，避免落点跑偏。 */
+
+/** 非标准 API 的最小声明（Chromium 才有 caretRangeFromPoint，lib.dom 未收录；
+ *  注意本文件已 import 了 CodeMirror 的 Range 类型，DOM Range 需写全名） */
+type CaretRangeApi = { caretRangeFromPoint?: (x: number, y: number) => globalThis.Range | null };
+
+/** 环境是否支持坐标 → 文本位置查询（jsdom 等测试环境不支持，需降级） */
+function hasCaretApi(doc: Document): boolean {
+  return (
+    typeof (doc as unknown as CaretRangeApi).caretRangeFromPoint === 'function' ||
+    typeof doc.caretPositionFromPoint === 'function'
+  );
+}
+
+/** 点击坐标处的文本节点与节点内偏移 */
+function caretAtPoint(doc: Document, x: number, y: number): { node: Node; offset: number } | null {
+  const r = (doc as unknown as CaretRangeApi).caretRangeFromPoint?.(x, y);
+  if (r) return { node: r.startContainer, offset: r.startOffset };
+  const p = doc.caretPositionFromPoint?.(x, y);
+  return p ? { node: p.offsetNode, offset: p.offset } : null;
+}
+
+/** 源码 → 纯文本投影：跳过 Markdown 标记字符（链接/图片的 ](url) 一并跳过）；
+ *  map[i] = 投影第 i 个字符在源码中的下标 */
+function plainProjection(src: string): { plain: string; map: number[] } {
+  const drop = new Set(['*', '_', '~', '=', '`', '#', '>', '[', ']', '|']);
+  let plain = '';
+  const map: number[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === ']' && src[i + 1] === '(') {
+      const close = src.indexOf(')', i);
+      if (close !== -1) {
+        i = close;
+        continue;
+      }
+    }
+    if (c === '\n' || c === '\r' || drop.has(c)) continue;
+    plain += c;
+    map.push(i);
+  }
+  return { plain, map };
+}
+
+/** 忽略空白归一化：norm = 去空白文本，idx[k] = norm[k] 在原串中的下标 */
+function looseMap(s: string): { norm: string; idx: number[] } {
+  let norm = '';
+  const idx: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') continue;
+    norm += c;
+    idx.push(i);
+  }
+  return { norm, idx };
+}
+
+/** 单击坐标 → 源码偏移；返回 null = 点到留白（不进入编辑，避免误触） */
+function sourceOffsetFromPoint(content: HTMLElement, source: string, x: number, y: number): number | null {
+  const doc = content.ownerDocument;
+  const empty = !source.trim();
+  // 环境无坐标查询能力（jsdom 测试）：无法定位，直接进入编辑（等价旧行为）
+  if (!hasCaretApi(doc)) return 0;
+  const hit = caretAtPoint(doc, x, y);
+  // 点到留白 / 命中元素节点 / 内容区外：空栏整块可点，非空栏不触发
+  // 注：nodeType 3 = TEXT_NODE、whatToShow 4 = SHOW_TEXT，用字面量避免依赖
+  // Node / NodeFilter 全局（jsdom 等测试环境未挂载这两个全局）
+  if (!hit || !content.contains(hit.node) || hit.node.nodeType !== 3) return empty ? 0 : null;
+
+  // 点击点在渲染文本中的字符偏移
+  let renderedOffset = hit.offset;
+  const walker = doc.createTreeWalker(content, 4);
+  for (let n = walker.nextNode(); n && n !== hit.node; n = walker.nextNode()) {
+    renderedOffset += n.textContent?.length ?? 0;
+  }
+
+  // 以点击点附近的渲染文本为锚点，在源码纯文本投影中定位
+  const rendered = content.textContent ?? '';
+  const start = Math.max(0, renderedOffset - 24);
+  const needle = rendered.slice(start, renderedOffset + 24);
+  const { plain, map } = plainProjection(source);
+  if (map.length) {
+    const pm = looseMap(plain);
+    const nn = looseMap(needle);
+    const at = nn.norm ? pm.norm.indexOf(nn.norm) : -1;
+    if (at >= 0) {
+      // 锚点内点击位置之前的有效字符数 → 投影中的对应位置 → 源码偏移
+      const before = looseMap(needle.slice(0, renderedOffset - start)).norm.length;
+      const plainIdx = pm.idx[Math.min(at + before, pm.idx.length - 1)];
+      return map[plainIdx] ?? 0;
+    }
+  }
+
+  // 兜底：按点击点在内容区中的垂直比例估源码行首
+  const rect = content.getBoundingClientRect();
+  const ratio = rect.height > 0 ? Math.min(1, Math.max(0, (y - rect.top) / rect.height)) : 0;
+  const lines = source.split('\n');
+  const target = Math.round(ratio * (lines.length - 1));
+  let off = 0;
+  for (let li = 0; li < target && li < lines.length; li++) off += lines[li].length + 1;
+  return off;
+}
+
+/* ===== 不可见标记（sentinel）：编辑态隐藏行内格式标记 =====
+ *
+ * 目标：编辑态 textarea 的光标不在某个行内格式区间（**加粗** / ==高亮== /
+ * ~~删除~~ / `代码` / 斜体）内时，该区间的标记字符不显示，使文本观感与渲染
+ * 快照一致，避免行内标记造成"文本偏移"。外观、widget 布局、写回管线均不变。
+ *
+ * 做法：把标记字符替换为等长的零宽不可见字符（长度不变 ⇒ 选区下标即源码
+ * 下标，无需偏移映射表）。只改编辑态 textarea 的 value：
+ *   value 显示值 = sentinelize(源码, 光标起, 光标止)
+ *   写回 / input / 剪贴板 = desentinelize(value)
+ * 光标（或选区）碰触某区间（含首尾）时，该区间标记还原为真实字符显示。 */
+
+/** 标记字符 → 等长不可见字符（U+2060–U+2064，零宽，仍占一个光标停靠位） */
+const MARKER_SENTINELS: Record<string, string> = {
+  '*': '\u2061',
+  '_': '\u2062',
+  '~': '\u2063',
+  '=': '\u2064',
+  '`': '\u2060',
+};
+
+/** 不可见字符 → 原标记字符（写回时还原） */
+const SENTINEL_TO_MARKER: Record<string, string> = {
+  '\u2061': '*',
+  '\u2062': '_',
+  '\u2063': '~',
+  '\u2064': '=',
+  '\u2060': '`',
+};
+
+/** 行内格式标记区间：[start, end) 为整个 span（含首尾标记），pre 为前后标记长度。
+ *  内容用 + 语义（至少 1 个非空白字符）⇒ 空对（**** / ____ 等）不参与配对，
+ *  既不隐藏也不静默删除，与原生一致。 */
+type InlinePattern = { pre: number; re: RegExp };
+const INLINE_FORMAT_PATTERNS: InlinePattern[] = [
+  { pre: 3, re: /\*\*\*(?=\S)[^\n]*?\S\*\*\*/g }, // ***粗斜体***
+  { pre: 2, re: /\*\*(?=\S)[^\n]*?\S\*\*/g }, // **加粗**
+  { pre: 1, re: /\*(?=\S)[^*\n]*?\S\*/g }, // *斜体*
+  { pre: 2, re: /(?<!\w)__(?=\S)[^\n]*?\S__(?!\w)/g }, // __加粗__
+  { pre: 1, re: /(?<!\w)_(?=\S)[^_\n]*?\S_(?!\w)/g }, // _斜体_
+  { pre: 2, re: /==(?=\S)[^\n]*?\S==/g }, // ==高亮==
+  { pre: 2, re: /~~(?=\S)[^\n]*?\S~~/g }, // ~~删除线~~
+  { pre: 1, re: /`(?=\S)[^`\n]*?\S`/g }, // `行内代码`
+];
+
+type InlineSpan = { start: number; end: number; pre: number };
+
+/** 收集一行的行内格式区间，去重叠（起点升序、长度降序贪心，长标记优先） */
+function findInlineSpans(line: string): InlineSpan[] {
+  const found: InlineSpan[] = [];
+  for (const p of INLINE_FORMAT_PATTERNS) {
+    p.re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = p.re.exec(line)) !== null) {
+      found.push({ start: m.index, end: m.index + m[0].length, pre: p.pre });
+      if (m[0].length === 0) p.re.lastIndex++;
+    }
+  }
+  found.sort((a, b) => a.start - b.start || b.end - a.end);
+  const kept: InlineSpan[] = [];
+  let lastEnd = -1;
+  for (const s of found) {
+    if (s.start < lastEnd) continue;
+    kept.push(s);
+    lastEnd = s.end;
+  }
+  return kept;
+}
+
+/** 源码 → 显示值：光标/选区 [activeFrom, activeTo] 未碰触到的格式区间，
+ *  其标记字符替换为等长不可见字符（长度为 1:1 ⇒ 选区下标即源码下标） */
+function sentinelize(source: string, activeFrom: number, activeTo: number): string {
+  const lines = source.split('\n');
+  let out = '';
+  let base = 0; // 当前行首在 source 中的偏移
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    // marks[i] = 该下标的字符所属的格式区间（仅标记字符本身，不含区间内容）
+    const marks: (InlineSpan | null)[] = new Array(line.length).fill(null);
+    for (const sp of findInlineSpans(line)) {
+      for (let k = 0; k < sp.pre; k++) {
+        marks[sp.start + k] = sp;
+        marks[sp.end - 1 - k] = sp;
+      }
+    }
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      const sp = marks[i];
+      const sent = MARKER_SENTINELS[c];
+      if (sp && sent) {
+        const active = activeFrom <= base + sp.end && activeTo >= base + sp.start;
+        out += active ? c : sent;
+      } else {
+        out += c;
+      }
+    }
+    base += line.length + 1;
+    if (li < lines.length - 1) out += '\n';
+  }
+  return out;
+}
+
+/** 显示值 → 源码：不可见字符还原为原标记字符 */
+function desentinelize(display: string): string {
+  return display.replace(/[\u2060-\u2064]/g, (ch) => SENTINEL_TO_MARKER[ch] ?? ch);
+}
+
+/** 按当前光标/选区刷新 textarea 显示值：需要还原/隐藏的标记与现状不同才写回
+ *  （长度不变、写回后恢复选区，避免无谓重建；输入法组合期间由调用方跳过） */
+function syncMarkerDisplay(ta: HTMLTextAreaElement): void {
+  const next = sentinelize(desentinelize(ta.value), ta.selectionStart, ta.selectionEnd);
+  if (next === ta.value) return;
+  const s = ta.selectionStart;
+  const e = ta.selectionEnd;
+  ta.value = next;
+  ta.setSelectionRange(s, e);
+}
+
 /**
  * 交互式分栏 widget（浏览与编辑合一）：
- *  - 每栏：⠿ 手柄（拖动排序 / 点击弹出命令菜单）+ 渲染内容（双击进入编辑）
+ *  - 每栏：⠿ 手柄（拖动排序 / 点击弹出命令菜单）+ 渲染内容（单击文本即编辑）
  *  - 栏间：分隔条（拖动调宽）
  *  - 命令菜单：新增栏（当前栏后插入）/ 删除栏（剩 1 栏时禁用）
  * 结构/内容变更直接写回文档（单步撤销）；无需独立编辑模式。
  */
+/** widget 内容签名：内容 / 宽度 / 背景 / 行结构 / 外观参数任一变化即需要重建 widget。
+ *  widget 的 get key() 与装饰构建共用，避免两处实现漂移导致缓存判断不一致。 */
+function columnsContentKey(
+  segments: string[],
+  widths: number[] | undefined,
+  bgs: (ColBg | null)[] | undefined,
+  rows: number[] | undefined,
+  opts: ColumnsOpts | undefined
+): string {
+  return (
+    segments.join('\u0000') +
+    '#' +
+    (widths?.join(',') ?? '') +
+    '#' +
+    (bgs?.map((b) => (b ? b.light + '/' + b.dark : '')).join(',') ?? '') +
+    '#' +
+    (rows?.join(',') ?? '') +
+    '#' +
+    JSON.stringify(opts ?? {})
+  );
+}
+
 class ColumnsWidget extends WidgetType {
   texts: string[] = [];
   widths: number[] = [];
@@ -381,6 +952,10 @@ class ColumnsWidget extends WidgetType {
   rows: number[] = [];
   region: ColumnsRegion;
   private editCol: number | null = null;
+  /** 进入编辑态后要落到 textarea 的光标偏移（单击定位用；渲染完成时消费一次） */
+  private pendingCaret: number | null = null;
+  /** 编辑态 selectionchange 监听器的生命周期（每次 render 重建、旧监听注销） */
+  private editAbort: AbortController | null = null;
   private textareas: HTMLTextAreaElement[] = [];
   private colEls: HTMLElement[] = [];
   private root: HTMLElement | null = null;
@@ -391,17 +966,7 @@ class ColumnsWidget extends WidgetType {
 
   /** 内容签名：内容/宽度/背景色/行结构/外观参数变化时装饰层会重建 widget */
   get key(): string {
-    return (
-      this.texts.join('\u0000') +
-      '#' +
-      this.widths.join(',') +
-      '#' +
-      this.bgs.map((b) => (b ? b.light + '/' + b.dark : '')).join(',') +
-      '#' +
-      this.rows.join(',') +
-      '#' +
-      JSON.stringify(this.opts)
-    );
+    return columnsContentKey(this.texts, this.widths, this.bgs, this.rows, this.opts);
   }
 
   /** CM 更新期间禁止 dispatch：事件触发的写回统一延迟到微任务执行 */
@@ -420,7 +985,9 @@ class ColumnsWidget extends WidgetType {
   constructor(
     private ctx: BlockEditorPlugin,
     region: ColumnsRegion,
-    private path: string
+    private path: string,
+    /** 所属 Obsidian 编辑器实例：把全局 Editor 原型补丁收敛到本分栏 */
+    private ownerEditor: unknown = null
   ) {
     super();
     this.region = region;
@@ -445,10 +1012,24 @@ class ColumnsWidget extends WidgetType {
    * 点击不再越界。
    */
   get estimatedHeight(): number {
-    // 每行（横向一组栏）估算 56px：栏有 grip + 内容骨架（min-height 28px）+
-    // margin/padding；多行 × 行数，至少 1 行。
+    // 每行（横向一组栏）估算高度：栏骨架 64px + 内容估算行数 × 24px 行高。
+    // 取所有栏中最大的文本换行行数（Markdown 渲染会包 ul/li/p 等，实际高度
+    // 通常不小于纯文本估算），宁高勿低：高估只让点击位置略偏不越界，
+    // 低估会让 CM6 行高缓存偏小 → posAtCoords 映射出越界 pos → lineInner 崩。
     const rows = this.rows.length ? this.rows.length : 1;
-    return Math.max(48, rows * 56);
+    let maxLines = 1;
+    for (const t of this.texts) {
+      let lines = 1;
+      for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) === 10) lines++;
+      if (lines > maxLines) maxLines = lines;
+    }
+    return Math.max(48, rows * (64 + maxLines * 24));
+  }
+
+  /** 单栏估算高度（与 estimatedHeight 每栏分量一致，同步占位防 0 高实测） */
+  private colEstimatedHeight(): number {
+    const rows = this.rows.length ? this.rows.length : 1;
+    return Math.max(28, Math.round(this.estimatedHeight / rows));
   }
 
   ignoreEvent(): boolean {
@@ -461,16 +1042,11 @@ class ColumnsWidget extends WidgetType {
     wrap.className = 'block-editor-columns-widget';
     wrap.dataset.regionStart = String(this.region.startPos);
     this.root = wrap;
-    this.render();
-    // 布局自检：确认 flex 样式是否被样式表命中
-    queueMicrotask(() => {
-      try {
-        const gs = wrap.ownerDocument.defaultView?.getComputedStyle(wrap);
-        colLog('widget 计算样式 display =', gs?.display, gs?.display === 'flex' ? '(CSS 生效)' : '(CSS 未生效!)');
-      } catch {
-        /* 环境无 getComputedStyle */
-      }
-    });
+    // 注意：toDOM 在 CM6 的 DOM 更新过程中被调用，此时构建尚未完成、读到的
+    // scrollTop 不可信（会被钳到 0）。这里不能走带视口锁定的 render()——否则
+    // 会把「钳后的 0」当成本次锚点还原回去，表现为撤销/重算后整页滚到最上面。
+    // 该路径交给 CM6 自身的滚动锚定处理；需要锁定的操作由调用方 commitDoc 兜住。
+    this.renderInner();
     return wrap;
   }
 
@@ -486,8 +1062,18 @@ class ColumnsWidget extends WidgetType {
         this.rowEnds,
         Object.keys(this.opts).length ? this.opts : undefined
       ) + (this.region.hasBreak ? '\n' : '');
-    view.dispatch({
-      changes: { from: this.region.startPos, to: this.region.endPos, insert: text },
+    // 幂等检查：区间内容与待写文本一致时不发起 dispatch。
+    // 无条件整 region 替换会触发 Obsidian metadataCache 对该文件链接的
+    // 异步重新解析，放大"编辑分栏后立即切阅读模式"的 embed unresolved
+    // 竞态窗口（阅读模式首次渲染显示加粗文件名回退）。
+    const curText = view.state.doc.sliceString(this.region.startPos, this.region.endPos);
+    if (curText === text) return;
+    // 视口锁定：写回会触发全量重扫 + widget 重建，CM6 按变更重算视口会让整篇
+    // 文档滚动条跳离当前编辑位置；此处钉住 scrollTop，操作后停留在原位置。
+    keepViewport(view, () => {
+      view.dispatch({
+        changes: { from: this.region.startPos, to: this.region.endPos, insert: text },
+      });
     });
   }
 
@@ -503,15 +1089,38 @@ class ColumnsWidget extends WidgetType {
     return ends.length ? ends : undefined;
   }
 
+  /** 重建 widget DOM（交互操作入口专用：菜单/拖拽/进入退出编辑）。
+   *  视口锁定：DOM 重建会改变 widget 实测高度，CM6 重算视口时整篇文档滚动条会
+   *  跳离当前编辑位置；钉住 scrollTop 让视图停在原处。
+   *  仅在「CM6 更新之外」的调用点使用——CM6 更新过程中（toDOM）读到的 scrollTop
+   *  不可信，该路径直接走 renderInner()。 */
   private render(): void {
+    keepViewport(this.parentView, () => this.renderInner());
+  }
+
+  /** 结构 / 内容变更后的统一收尾：写回文档 + 重建 DOM。
+   *  写回延迟到微任务（CM 更新期间禁止 dispatch）。 */
+  private mutate(): void {
+    queueMicrotask(() => this.commitDoc());
+    this.render();
+  }
+
+  private renderInner(): void {
     const wrap = this.root;
     if (!wrap) return;
+    // 重建 DOM 前注销旧编辑态 textarea 的 selectionchange 监听器（避免泄漏/串扰）
+    if (this.editAbort) {
+      this.editAbort.abort();
+      this.editAbort = null;
+    }
     const focusTarget = this.editCol;
     wrap.textContent = '';
     this.textareas = [];
     this.colEls = [];
     this.closeMenu();
     this.closeColorPicker();
+    // 非编辑态渲染时注销格式命令目标（创建 textarea 时会重新登记）
+    if (this.editCol === null) setColumnEditTarget(null);
 
     // 二维行分组：有 rows 时按行渲染（每行一个 flex 行），否则全部栏单行渲染
     const rowLens = this.rows.length ? this.rows : [this.texts.length];
@@ -559,21 +1168,78 @@ class ColumnsWidget extends WidgetType {
         col.appendChild(grip);
 
         if (this.editCol === i) {
-          // 编辑态：textarea，失焦写回
+          // 编辑态：textarea，失焦写回。
+          // value 为"显示值"：光标不在其中的行内格式标记以等长不可见字符隐藏
+          // （初始 activeFrom/activeTo = -1 ⇒ 全部隐藏，落点设置后由 syncMarkerDisplay 还原）
           const ta = document.createElement('textarea');
           ta.className = 'block-editor-col-textarea';
-          ta.value = this.texts[i];
+          ta.value = sentinelize(this.texts[i], -1, -1);
           ta.spellcheck = false;
+          // 行数决定固有高度：进入编辑态即按内容行数撑开（否则长内容被截成约 3 行）
+          syncTextareaRows(ta);
+          // 登记为编辑器命令目标：Mod+B / 右键「文本格式」等将重定向落到本 textarea；
+          // 同时登记所属编辑器，避免桥接误作用于其他分屏的同名 API 调用
+          setColumnEditTarget(ta, this.ownerEditor);
+          // 剪贴板与全选事件不向上冒泡到 CM6 / Obsidian 编辑器层，交回 textarea 原生处理
+          guardTextareaEditing(ta);
+          // 光标移动（含打字/方向键/点击）时按新位置刷新标记显示；输入法组合期间跳过
+          // （组合期间重建 value 会打断候选），组合结束再补一次
+          let composing = false;
+          ta.addEventListener('compositionstart', () => {
+            composing = true;
+          });
+          ta.addEventListener('compositionend', () => {
+            composing = false;
+            syncMarkerDisplay(ta);
+            autosizeTextarea(ta);
+          });
+          const ac = new AbortController();
+          this.editAbort = ac;
+          document.addEventListener(
+            'selectionchange',
+            () => {
+              if (composing) return;
+              if (document.activeElement !== ta) return;
+              // 仅光标态（选区拖拽期间重建 value 会干扰原生拖选，且需求针对光标）
+              if (ta.selectionStart !== ta.selectionEnd) return;
+              syncMarkerDisplay(ta);
+            },
+            { signal: ac.signal }
+          );
           ta.addEventListener('input', () => {
-            this.texts[i] = ta.value;
+            this.texts[i] = desentinelize(ta.value);
+            // 增删行时同步高度（textarea 不原生自适应）
+            syncTextareaRows(ta);
+            autosizeTextarea(ta);
+          });
+          // 显示值含不可见字符：复制/剪切时还原为真实标记写入剪贴板
+          ta.addEventListener('copy', (e) => {
+            const s = ta.selectionStart;
+            const en = ta.selectionEnd;
+            if (s === en) return;
+            e.clipboardData?.setData('text/plain', desentinelize(ta.value.slice(s, en)));
+            e.preventDefault();
+          });
+          ta.addEventListener('cut', (e) => {
+            const s = ta.selectionStart;
+            const en = ta.selectionEnd;
+            if (s === en) return;
+            e.clipboardData?.setData('text/plain', desentinelize(ta.value.slice(s, en)));
+            e.preventDefault();
+            const val = ta.value.slice(0, s) + ta.value.slice(en);
+            ta.value = val;
+            ta.setSelectionRange(s, s);
+            this.texts[i] = desentinelize(val);
+            syncMarkerDisplay(ta);
           });
           ta.addEventListener('blur', () => {
             // 失焦可能发生在 CM 更新过程中（DOM 重建触发），写回必须延迟到微任务
             this.later(() => {
               if (this.editCol === i) {
-                this.texts[i] = ta.value;
+                this.texts[i] = desentinelize(ta.value);
                 this.editCol = null;
                 editingWidgets.delete(this);
+                setColumnEditTarget(null);
                 queueMicrotask(() => this.commitDoc());
               }
               this.render();
@@ -586,6 +1252,7 @@ class ColumnsWidget extends WidgetType {
               this.later(() => {
                 this.editCol = null;
                 editingWidgets.delete(this);
+                setColumnEditTarget(null);
                 queueMicrotask(() => this.commitDoc());
                 this.render();
               });
@@ -594,18 +1261,44 @@ class ColumnsWidget extends WidgetType {
           col.appendChild(ta);
           this.textareas.push(ta);
         } else {
-          // 渲染态：MarkdownRenderer 快照，双击进入该栏编辑
+          // 渲染态：MarkdownRenderer 快照，单击文本进入该栏编辑（光标落至点击处附近）
           const content = document.createElement('div');
           content.className = 'block-editor-col-content';
-          // 双击进入该栏编辑（单击不响应，避免误触）
-          content.addEventListener('dblclick', () => this.enterEdit(i));
+          content.addEventListener('mousedown', (e) => {
+            // 仅左键单击且无修饰键
+            if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+            // 链接（含标签 a.tag、嵌入 a.internal-link）：不进入编辑。enterEdit 会重建
+            // DOM，anchor 被移除后 click 不再派发 → 链接失效。此处不 preventDefault、
+            // 不重建，点击交回浏览器 / Obsidian 的链接处理。
+            if ((e.target as Element | null)?.closest?.('a')) return;
+            // 已在编辑其他栏：不拦截本次点击，交给 textarea 失焦写回本次编辑（再次点击进入本栏）
+            if (this.editCol !== null && this.editCol !== i) return;
+            const pos = sourceOffsetFromPoint(content, this.texts[i], e.clientX, e.clientY);
+            if (pos === null) return; // 点到留白：不触发，避免误触
+            e.preventDefault();
+            this.enterEdit(i, pos);
+          });
           col.appendChild(content);
+          // 同步占位高度：与 estimatedHeight 每栏分量对齐。MarkdownRenderer 是
+          // 异步渲染，填充前 content 若为 0/28px 矮高度，CM6 首次实测会记录矮
+          // 高度 → viewport 行高映射错位 → 点击/滚动时 posAtCoords 算出越界
+          // pos → lineInner 崩（undefined.length）。min-height 撑起与估算一致的
+          // 高度，让首次实测即接近最终值。
+          content.style.minHeight = this.colEstimatedHeight() + 'px';
           // 空栏：不渲染空内容，加占位类（CSS 提供 min-height 可点区域 + "点击编辑此栏"提示）
           if (!this.texts[i] || !this.texts[i].trim()) {
             content.classList.add('block-editor-col-empty');
           } else {
             MarkdownRenderer.render(this.ctx.app, this.texts[i], content, this.path, this.ctx)
-              .then(() => this.parentView?.requestMeasure())
+              .then(() => {
+                // 多级 requestMeasure：立即 + 下一帧 + 300ms（覆盖异步图片/字体
+                // 加载后的高度变化），确保 viewport 行高缓存尽快收敛到真实高度，
+                // 缩短"实测矮高度 → 内容变高"的错位窗口。
+                const rm = (): void => this.parentView?.requestMeasure();
+                rm();
+                requestAnimationFrame(rm);
+                setTimeout(rm, 300);
+              })
               .catch(() => {
                 content.setText('点击编辑此栏');
               });
@@ -617,12 +1310,34 @@ class ColumnsWidget extends WidgetType {
       }
     }
 
-    if (focusTarget !== null && this.textareas[0]) this.textareas[0].focus();
+    // 编辑态高度按内容贴合：此时 DOM 已挂载，可测量 scrollHeight。
+    // 显式高度决定该栏高度，进而让整块高度以内容最多的栏为准。
+    for (const ta of this.textareas) autosizeTextarea(ta);
+
+    if (focusTarget !== null && this.textareas[0]) {
+      const ta = this.textareas[0];
+      // preventScroll：聚焦会让浏览器把整个编辑区滚动到 textarea，导致页面跳到别处
+      ta.focus({ preventScroll: true });
+      // 单击进入编辑：把光标落到点击处对应的源码偏移（越界钳制）
+      const caret = this.pendingCaret;
+      this.pendingCaret = null;
+      if (caret !== null) {
+        // 显示值与源码等长 ⇒ 源码偏移即 value 下标
+        const p = Math.max(0, Math.min(caret, ta.value.length));
+        ta.setSelectionRange(p, p);
+      }
+      // 落点确定后按光标位置还原该处的行内标记（其余仍隐藏）
+      syncMarkerDisplay(ta);
+    }
   }
 
-  private enterEdit(i: number): void {
+  /** 进入编辑态；caretPos 为光标要落到的源码偏移（单击定位，不传则等同旧行为） */
+  private enterEdit(i: number, caretPos: number | null = null): void {
     if (this.editCol !== null) return;
+    // 进入编辑态前确保格式命令桥接已安装（有活动编辑器时才可取得原型）
+    installColumnsFormatBridge(this.ctx.app);
     this.editCol = i;
+    this.pendingCaret = caretPos;
     editingWidgets.add(this);
     this.render();
   }
@@ -634,16 +1349,21 @@ class ColumnsWidget extends WidgetType {
     // 装饰层重建后旧实例已脱离文档，写回会落到失效视图，直接放弃
     if (this.root && !this.root.isConnected) {
       this.editCol = null;
+      setColumnEditTarget(null);
       return;
     }
     const ta = this.textareas[this.editCol];
-    if (ta) this.texts[this.editCol] = ta.value;
+    if (ta) this.texts[this.editCol] = desentinelize(ta.value);
     this.editCol = null;
+    setColumnEditTarget(null);
     try {
       this.commitDoc();
     } catch {
       /* 视图已销毁，写回失败可忽略（原文仍在编辑器文档中） */
     }
+    // 强制结束编辑后同步重建 DOM：否则残留的 textarea 已不在编辑态（editCol=null），
+    // 继续输入只更新内存文本、失焦时也不再写回，会静默丢字。
+    if (this.root?.isConnected) this.render();
   }
 
   /** 当前栏所在行号（单行时恒 0） */
@@ -673,8 +1393,7 @@ class ColumnsWidget extends WidgetType {
     this.texts.splice(afterIndex + 1, 0, '');
     this.bgs.splice(afterIndex + 1, 0, null);
     if (this.rows.length) this.rows[this.rowIndexOf(afterIndex)]++;
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** 删除指定栏；被删栏宽度按比例分给剩余栏（总和回到 100）；剩 1 栏时不执行 */
@@ -695,8 +1414,7 @@ class ColumnsWidget extends WidgetType {
       // 行内栏删光且还有其它行：移除该行（行结构保持 ≥1 行）
       if (this.rows[r] <= 0 && this.rows.length > 1) this.rows.splice(r, 1);
     }
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** H2：把第 i 栏拆成两栏（文本按行对半，宽度对半，背景沿用） */
@@ -713,8 +1431,7 @@ class ColumnsWidget extends WidgetType {
     this.widths[i] = w / 2;
     this.bgs.splice(i + 1, 0, this.bgs[i] ?? null);
     if (this.rows.length) this.rows[this.rowIndexOf(i)]++;
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** H2：把第 i 栏与下一栏合并（行末栏禁止跨行合并；剩 1 栏时不执行） */
@@ -729,8 +1446,7 @@ class ColumnsWidget extends WidgetType {
     this.widths.splice(i + 1, 1);
     this.bgs.splice(i + 1, 1);
     if (this.rows.length) this.rows[this.rowIndexOf(i)]--;
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** H2：分栏末尾追加一行（栏数与首行一致，含 `>> [!colrow]` 行标记） */
@@ -744,8 +1460,7 @@ class ColumnsWidget extends WidgetType {
     // 单行老笔记（rows 为空）追加首行后变为二维：首行 + 新行都要记录；
     // 否则 rows=[N] 会被当成单行 N 栏，rowEnds 为空导致写回丢失 colrow 标记
     this.rows = this.rows.length ? [...this.rows, perRow] : [perRow, perRow];
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** H2：删除整行（移除该行全部栏；删后仅剩 1 行时回到单行模式，colrow 标记一并剥离） */
@@ -757,8 +1472,7 @@ class ColumnsWidget extends WidgetType {
     this.bgs.splice(s, e - s);
     this.rows.splice(r, 1);
     if (this.rows.length === 1) this.rows = [];
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** H2：整行上移 / 下移（交换相邻两行的栏块、宽度、背景与行宽数组） */
@@ -779,8 +1493,7 @@ class ColumnsWidget extends WidgetType {
     const tmp = this.rows[r];
     this.rows[r] = this.rows[t];
     this.rows[t] = tmp;
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   // 按住栏间分隔条拖拽：调整相邻两栏的宽度（总和不变，最小 10%）
@@ -810,14 +1523,18 @@ class ColumnsWidget extends WidgetType {
         colEls[1].style.removeProperty('max-width');
       }
     };
-    const onUp = () => {
+    // 收尾统一入口：mouseup 与 window blur（指针移出窗口 / 切换应用导致丢事件）都走它，
+    // 避免 mousemove / mouseup 监听器在丢失 mouseup 时残留
+    const finish = (): void => {
       window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('mouseup', finish);
+      window.removeEventListener('blur', finish);
       resizer.classList.remove('is-active');
       this.later((view) => this.commitDoc());
     };
     window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    window.addEventListener('mouseup', finish);
+    window.addEventListener('blur', finish);
   }
 
   // 按住栏顶手柄：位移超过阈值进入拖拽排序；未超阈值松手视为点击，弹出命令菜单。
@@ -831,6 +1548,11 @@ class ColumnsWidget extends WidgetType {
     let dragging = false;
     let hover = -1;
     const clearDrop = () => this.colEls.forEach((c) => c.classList.remove('block-editor-col-drop'));
+    const detach = (): void => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('blur', onCancel);
+    };
     const onMove = (ev: MouseEvent) => {
       if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) <= THRESHOLD) return;
       dragging = true;
@@ -838,9 +1560,13 @@ class ColumnsWidget extends WidgetType {
       hover = el ? this.colEls.indexOf(el as HTMLElement) : -1;
       this.colEls.forEach((c, k) => c.classList.toggle('block-editor-col-drop', k === hover && hover !== from));
     };
+    // 失焦（指针移出窗口 / 切换应用）时取消拖拽并解绑，避免监听残留
+    const onCancel = (): void => {
+      detach();
+      clearDrop();
+    };
     const onUp = (ev: MouseEvent) => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      detach();
       clearDrop();
       if (!dragging) {
         // 点击（未拖动）：弹出命令菜单
@@ -857,14 +1583,14 @@ class ColumnsWidget extends WidgetType {
           this.widths.splice(to, 0, w);
           const [b] = this.bgs.splice(from, 1);
           this.bgs.splice(to, 0, b);
-          queueMicrotask(() => this.commitDoc());
-          this.render();
+          this.mutate();
           void view;
         });
       }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onCancel);
   }
 
   // ---- grip 命令菜单：设置背景色 / 新增栏 / 删除栏（横排纯图标） ----
@@ -919,8 +1645,7 @@ class ColumnsWidget extends WidgetType {
    *  显式覆盖深色请用 applyBgDark。 */
   private applyBg(i: number, color: string | null): void {
     this.bgs[i] = color ? { light: color, dark: deriveDarkColor(color) } : null;
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   /** 覆盖/清除某栏深色主题背景：dark 为 null 时恢复为自动推导值 */
@@ -928,8 +1653,7 @@ class ColumnsWidget extends WidgetType {
     const cur = this.bgs[i];
     if (!cur?.light) return;
     this.bgs[i] = { light: cur.light, dark: dark ?? deriveDarkColor(cur.light) };
-    queueMicrotask(() => this.commitDoc());
-    this.render();
+    this.mutate();
   }
 
   private showColMenu(e: MouseEvent, i: number): void {
@@ -1124,7 +1848,7 @@ class ColumnsWidget extends WidgetType {
     applyBtn.textContent = '应用';
     const applyHex = (): void => {
       const v = input.value.trim();
-      if (!/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(v)) {
+      if (!HEX_COLOR_RE.test(v)) {
         input.classList.add('is-invalid');
         return;
       }
@@ -1170,7 +1894,7 @@ class ColumnsWidget extends WidgetType {
     });
     const applyDarkHex = (): void => {
       const v = darkInput.value.trim();
-      if (!/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(v)) {
+      if (!HEX_COLOR_RE.test(v)) {
         darkInput.classList.add('is-invalid');
         return;
       }
@@ -1241,10 +1965,15 @@ function path_of(state: DecorState): string {
 
 /**
  * 浏览 widget 复用缓存：区间内容未变时复用实例（保焦点、防闪烁）。
- * CM6 防御：key 记录文档标识（path），防跨文档同 startPos 误复用
- * （widget 持有 DOM 与编辑器引用，跨文档复用会造成脏 DOM / 位置错乱）。
+ * CM6 防御：key 记录文档标识（path）+ 所属视图（owner）防误复用——
+ * widget 持有 DOM 与编辑器引用（parentView / root 为单实例），
+ * 跨文档或同一文件的不同分屏共用同一 startPos / 内容签名时若复用，
+ * parentView 会被后者覆盖、DOM 被搬走、写回 dispatch 落到错误视图。
  */
-const widgetCache = new Map<number, { path: string; key: string; widget: ColumnsWidget }>();
+const widgetCache = new Map<
+  number,
+  { path: string; owner: unknown; key: string; widget: ColumnsWidget }
+>();
 let sharedCtx: BlockEditorPlugin | null = null;
 
 /** 装饰构建：整个分栏区域替换为交互 widget */
@@ -1252,6 +1981,8 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
   const ranges: Range<Decoration>[] = [];
   const live = state.field(editorLivePreviewField);
   const docId = path_of(state) || 'untitled';
+  // 每视图判别符：同一文件的不同分屏各有独立 Editor 实例，用于避免 widget 误复用
+  const owner = state.field(editorInfoField)?.editor ?? null;
   lastDiagnostics.livePreview = live;
 
   lastDiagnostics.regions = regions.length;
@@ -1269,10 +2000,11 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
   }
 
   const used = new Set<number>();
+  // docLen 与本函数内不变，提到循环外避免每个区间重复计算
+  const docLen = state.doc.line(state.doc.lines).to;
   for (const r of regions) {
     // 行边界钳制（防御）：startPos/endPos 必须为有限数值且落在 0..doc.length
     // 内且有序，不合规的区间跳过并记诊断，避免 Decoration.replace 越界抛错。
-    const docLen = state.doc.line(state.doc.lines).to;
     const clampStart = Math.max(0, Math.min(r.startPos, docLen));
     const clampEnd = Math.max(clampStart, Math.min(r.endPos, docLen));
     if (
@@ -1290,33 +2022,24 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
       continue;
     }
     used.add(r.startPos);
-    const key =
-      r.segments.join('\u0000') +
-      '#' +
-      (r.widths?.join(',') ?? '') +
-      '#' +
-      (r.bgs?.map((b) => (b ? b.light + '/' + b.dark : '')).join(',') ?? '') +
-      '#' +
-      (r.rows?.join(',') ?? '') +
-      '#' +
-      JSON.stringify(r.opts ?? {});
+    const key = columnsContentKey(r.segments, r.widths, r.bgs, r.rows, r.opts);
     let entry = widgetCache.get(r.startPos);
     let widget: ColumnsWidget;
-    if (entry && entry.path === docId && entry.key === key) {
-      // 同一文档且内容未变：复用实例（保焦点、防闪烁），仅同步位置
+    if (entry && entry.path === docId && entry.owner === owner && entry.key === key) {
+      // 同一视图且内容未变：复用实例（保焦点、防闪烁），仅同步位置
       widget = entry.widget;
       widget.region = r;
     } else {
       colLog('创建渲染 widget', { startLine: r.startLine, doc: docId });
-      widget = new ColumnsWidget(ctx_of(state), r, docId);
-      widgetCache.set(r.startPos, { path: docId, key, widget });
+      widget = new ColumnsWidget(ctx_of(state), r, docId, owner);
+      widgetCache.set(r.startPos, { path: docId, owner, key, widget });
     }
     ranges.push(Decoration.replace({ block: true, widget }).range(clampStart, clampEnd));
   }
-  // 清理已消失区间 / 已不属于当前文档的缓存
+  // 清理已消失区间 / 已不属于当前文档或当前视图的缓存
   for (const k of [...widgetCache.keys()]) {
     const e = widgetCache.get(k);
-    if (!e || e.path !== docId || !used.has(k)) widgetCache.delete(k);
+    if (!e || e.path !== docId || e.owner !== owner || !used.has(k)) widgetCache.delete(k);
   }
   return Decoration.set(ranges, true);
 }
@@ -1330,10 +2053,19 @@ function ctx_of(state: DecorState): BlockEditorPlugin {
  * 跨换行的 block 替换装饰从 ViewPlugin 提供会被 CM6 静默拒绝（仅控制台报错）。
  * 必须通过 provide 接入 decorations facet，否则装饰只存在于字段值中、视图不可见。
  *
- * H6 性能优化：全量扫描仅发生在初始化 / 强制重算 / 单次大变更（>50 行，粘贴 / 全选替换）时；
- * 常规 docChanged 走增量重扫：只重扫受影响区间，其余已识别区间按变更平移行号复用，
- * 避免大文档每次击键全文档扫描。语义与 scanRegions 全量一致（含围栏感知与 colrow 行结构）。
+ * 性能：文档变更默认全量重扫（增量平移方案因行号位移统计不可靠已弃用，见 update 注释）；
+ * 仅当此前不存在任何分栏区间、且本次变更未插入 `>` 字符时走快速路径直接沿用旧值，
+ * 避免无分栏文档的每次击键都全量扫描。
  */
+/** 本次事务是否插入了含 `>` 的文本（分栏行的必要前缀，快速路径判定用） */
+function insertsQuote(tr: Transaction): boolean {
+  let hit = false;
+  tr.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+    if (inserted.toString().includes('>')) hit = true;
+  });
+  return hit;
+}
+
 export const columnsField = StateField.define<ColumnsState>({
   create: () => {
     colLog('分栏字段创建（编辑器初始化）');
@@ -1352,6 +2084,11 @@ export const columnsField = StateField.define<ColumnsState>({
       // 未初始化（create 拿不到文档）或强制重算时，选区事务也要完整计算
       if (value.initialized && !tr.docChanged && !forced) return value;
       if (!value.initialized || forced) return fullRescan(tr);
+
+      // 快速路径：此前没有任何分栏区间、且本次未插入 `>` 时不可能新生分栏
+      // （分栏行必以 `>` 引用开头；删除无法凭空造出 `>` 行），直接沿用旧值，
+      // 避免无分栏文档的每次击键都全量扫描。
+      if (value.regions.length === 0 && !insertsQuote(tr)) return value;
 
       // 任何文档变更一律全量重扫（放弃 H6 增量 kept 平移）。
       // 原因：iterChangedRanges 的 fromB/toB 语义 + lineAt 对行尾位置的归属，
@@ -1405,10 +2142,56 @@ const columnsInteractions = ViewPlugin.fromClass(
   }
 );
 
+/**
+ * 撤销/重做视口保护：
+ * 撤销会让分栏 widget 重建、CM6 重算视口，并把视图滚走（常见是滚回文档顶部——
+ * 撤销事务会带上「滚动到光标」目标，而光标往往还停在文档开头）。
+ *
+ * 这里在 ViewPlugin.update 里记下滚动锚点：该钩子在 CM6 的 DOM 更新之前执行
+ * （EditorView.update 顺序为 viewState.update → updatePlugins → docView.update），
+ * 此刻 scrollTop 仍然可信。随后用 scrollSnapshot 事务去「覆盖」撤销事务携带的
+ * 滚动目标——后派发的事务会替换掉原来的 scrollTarget，CM6 在测量阶段按锚点还原
+ * 到原位置，而不是滚到光标处。
+ * 仅在本文档存在分栏区间时生效，避免改变普通文档的原生撤销行为。
+ */
+const undoViewportGuard = ViewPlugin.fromClass(
+  class {
+    update(update: ViewUpdate): void {
+      if (!update.docChanged) return;
+      const isUndoRedo = update.transactions.some(
+        (tr) => tr.isUserEvent('undo') || tr.isUserEvent('redo')
+      );
+      if (!isUndoRedo) return;
+      const view = update.view;
+      // 字段缺失或本文档没有分栏区间时不介入
+      const state = view.state.field(columnsField, false);
+      if (!state || !state.regions.length) return;
+      const sd = view.scrollDOM;
+      const top = sd.scrollTop;
+      if (top <= 0) return; // 本来就在顶部，没有可保护的位置
+      const snap = view.scrollSnapshot();
+      const restore = (): void => {
+        if (!view.dom.isConnected) return;
+        try {
+          view.dispatch({ effects: snap });
+        } catch {
+          /* 视图已销毁 */
+        }
+      };
+      // 微任务：在 CM6 测量（应用原撤销滚动目标）之前派发，抢占 scrollTarget
+      queueMicrotask(restore);
+      // 下一帧：兜住测量之后才发生的异步滚动
+      requestAnimationFrame(() => {
+        if (Math.abs(sd.scrollTop - top) > 1) restore();
+      });
+    }
+  }
+);
+
 export function columnsExtension(ctx: BlockEditorPlugin): Extension {
   sharedCtx = ctx;
   // 最高优先级：压过 Obsidian 原生 callout 渲染块的装饰
-  return Prec.highest([columnsField, columnsInteractions]);
+  return Prec.highest([columnsField, columnsInteractions, undoViewportGuard]);
 }
 
 /** 设置切换后让所有编辑器立即重算分栏装饰（无需重载插件） */

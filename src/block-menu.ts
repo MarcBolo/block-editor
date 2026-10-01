@@ -49,13 +49,28 @@ export class BlockMenuController {
       });
     }
 
+    // 折叠块展开态切换：仅对折叠块显示，非折叠块不出现该项
+    const fold = this.ctx.converter.foldStateOf(block);
+    if (fold !== null) {
+      menu.addItem((mi) =>
+        mi
+          .setTitle(fold === 'collapsed' ? '展开' : '折叠')
+          .onClick(() => this.ctx.converter.toggleFoldState(block))
+      );
+    }
+
     menu.addSeparator();
     menu.addItem((mi) => mi.setTitle('在上方插入块').onClick(() => this.ctx.ops.insertBlock(block, 'above')));
     menu.addItem((mi) => mi.setTitle('在下方插入块').onClick(() => this.ctx.ops.insertBlock(block, 'below')));
 
     menu.addSeparator();
     menu.addItem((mi) => mi.setTitle('复制块内容').onClick(() => this.ctx.ops.copyBlockContent(block)));
-    menu.addItem((mi) => mi.setTitle('复制块链接').onClick(() => this.ctx.ids.copyBlockLink(block)));
+    menu.addItem((mi) =>
+      mi.setTitle('生成块 ID').onClick(() => this.ctx.ids.copyBlockLink(block))
+    );
+    menu.addItem((mi) =>
+      mi.setTitle('引用其他块…').onClick(() => this.ctx.ids.referenceOtherBlock(block))
+    );
     menu.addItem((mi) => mi.setTitle('创建副本').onClick(() => this.ctx.ops.duplicateBlock(block)));
 
     menu.addSeparator();
@@ -124,7 +139,7 @@ export class BlockMenuController {
     // H5 任意块颜色标记：设置 / 更改 / 清除（浮层定位取菜单项点击位置）
     const hasColor = this.ctx.converter.blockColorOf(block) !== null;
     menu.addItem((mi) =>
-      mi.setTitle(hasColor ? '更改颜色标记' : '设置颜色标记').onClick((ev) => {
+      mi.setTitle('块颜色').onClick((ev) => {
         openBlockColorPicker({
           x: (ev as MouseEvent).clientX,
           y: (ev as MouseEvent).clientY,
@@ -138,7 +153,7 @@ export class BlockMenuController {
     );
     if (hasColor) {
       menu.addItem((mi) =>
-        mi.setTitle('清除颜色标记').onClick(() => this.ctx.converter.clearBlockColor(block))
+        mi.setTitle('清除块颜色').onClick(() => this.ctx.converter.clearBlockColor(block))
       );
     }
 

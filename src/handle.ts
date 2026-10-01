@@ -237,7 +237,13 @@ export class HandleController {
     if (this.ctx.drag.isActive()) return;
     const block = this.getCursorBlock();
     this.cursorBlock = block;
-    if (!block || !this.ctx.settings.handleFollowsCursor) return;
+    // 取不到光标块（切换页面 / 编辑器失焦）：手柄与高亮是 body 上的
+    // fixed 浮层，不会随页面切换自动移除，必须在此清除上一页的残留。
+    if (!block) {
+      this.hideHandle();
+      return;
+    }
+    if (!this.ctx.settings.handleFollowsCursor) return;
     this.currentBlock = block;
     this.showHandle(block.editor, block);
   }

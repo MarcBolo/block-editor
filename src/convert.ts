@@ -347,9 +347,8 @@ export class BlockConverter {
     if (/^[-*+]\s+\[[ xX]\]\s/.test(s)) return 'todo';
     if (/^[-*+]\s/.test(s)) return 'ul';
     if (/^\d+[.)]\s/.test(s)) return 'ol';
-    if (/^>\s*\[![\w-]+\][+-]?\s/.test(s)) {
-      return /^>\s*\[![\w-]+\]-\s/.test(s) ? 'toggle' : 'callout';
-    }
+    const co = s.match(/^>\s*\[!([\w-]+)\]([+-])?\s/);
+    if (co) return co[2] ? 'toggle' : 'callout';
     if (/^>\s?/.test(s)) return 'quote';
     if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(s)) return 'divider';
     return 'paragraph';
@@ -359,6 +358,33 @@ export class BlockConverter {
     const line = block.editor.getLine(block.start);
     const match = line.match(/^\s*(?:`{3,}|~{3,})(.*)$/);
     return match ? match[1].trim() : '';
+  }
+
+  // 折叠块当前状态：`[!type]-` 折叠 / `[!type]+` 展开；非折叠块返回 null
+  foldStateOf(block: BlockContext): 'collapsed' | 'expanded' | null {
+    const s = block.editor.getLine(block.start).replace(/^\s*/, '');
+    const m = s.match(/^>\s*\[![\w-]+\]([+-])\s/);
+    if (!m) return null;
+    return m[1] === '-' ? 'collapsed' : 'expanded';
+  }
+
+  // 折叠块展开态切换：把参与操作的每个折叠块首行 `-` 与 `+` 互换（单步撤销）
+  toggleFoldState(block: BlockContext): void {
+    const editor = block.editor;
+    const ranges = this.ctx.selection.actionRanges(block);
+    let hit = 0;
+    for (const r of ranges) {
+      const line = editor.getLine(r.start);
+      const next = line.replace(/^(\s*>\s*\[![\w-]+\])([+-])(\s)/, (_m, head, sign, sp) =>
+        head + (sign === '-' ? '+' : '-') + sp
+      );
+      if (next !== line) {
+        editor.setLine(r.start, next);
+        hit++;
+      }
+    }
+    if (!hit) new Notice('当前块不是折叠块');
+    this.ctx.handle.hideHandle();
   }
 
   // ---- 分栏（multi-column callout）----
@@ -930,13 +956,16 @@ export class BlockConverter {
    */
   wrapToEdgeColumns(editor: Editor, a: BlockRange[], b: BlockRange, side: -1 | 1): boolean {
     if (!a.length) return false;
-    if (a.some((r) => r.start === b.start)) return false;
+    // 拖动区间与目标区间相交（含相等）时拒绝：合成按 min/max 取范围会吞掉中间内容
+    if (a.some((r) => r.start <= b.end && b.start <= r.end)) return false;
     // 目标不能是分栏外壳或分栏内部块（拖进分栏内部会截断结构）
     if (this.isColumnsBlock(editor, b) || this.insideColumns(editor, b)) return false;
     const rs = [...a].sort((x, y) => x.start - y.start);
     const lines: string[] = [];
     for (const r of rs) lines.push(...getLines(editor, r.start, r.end));
     const bLines = getLines(editor, b.start, b.end);
+    // 目标块整块为空行时拒绝：会生成一个空栏，无意义
+    if (bLines.every((l) => l.trim() === '')) return false;
     // 合成两栏：左侧 = 左栏文本，右侧 = 右栏文本（宽缺省 50-50）
     const left = side === -1 ? lines : bLines;
     const right = side === -1 ? bLines : lines;

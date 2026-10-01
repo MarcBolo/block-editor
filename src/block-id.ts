@@ -4,6 +4,7 @@ import type { BlockContext } from './types';
 import type BlockEditorPlugin from './main';
 import { ID_WORDS } from './constants';
 import { ConfirmModal } from './modal';
+import { pickBlock, pickNoteWithBlocks } from './picker';
 import { getLines } from './util';
 
 /** 块 ID：生成、附加、查找、清除与块链接复制 */
@@ -18,7 +19,7 @@ export class BlockIdService {
     const id = this.ensureBlockId(block);
     navigator.clipboard
       .writeText(`[[${block.file.basename}#^${id}]]`)
-      .then(() => new Notice(`已复制块链接 #^${id}`));
+      .then(() => new Notice(`已生成块 ID #^${id} 并复制链接`));
     this.ctx.handle.hideHandle();
   }
 
@@ -115,42 +116,15 @@ export class BlockIdService {
     });
   }
 
-  // M2：光标所在块生成块 ID，并在块后插入独立嵌入块 `![[笔记名#^id]]`，
-  // 复用 Obsidian 原生嵌入渲染（块 ID 独立成行时嵌入行落在其后方）。
-  embedCurrentBlock(editor: Editor): void {
-    const cursor = editor.getCursor();
-    const block = this.ctx.detector.getBlockAtLine(editor, cursor.line);
-    if (!block) {
-      new Notice('这一行没有可操作的块');
-      return;
-    }
-    const file = this.ctx.app.workspace.getActiveFile();
-    if (!file) {
-      new Notice('无法定位当前文件');
-      return;
-    }
-    const id = this.ensureBlockId({
-      editor,
-      file,
-      start: block.start,
-      end: block.end,
-      type: block.type,
+  /** 图形化引用：选含块 ID 的笔记 → 选块 → 在当前块下方插入 [[目标笔记#^id]] 链接 */
+  referenceOtherBlock(block: BlockContext): void {
+    pickNoteWithBlocks(this.ctx.app, (file) => {
+      pickBlock(this.ctx.app, file, (id) => {
+        // 用普通链接（不带 !）：可点击跳转；带 ! 是嵌入语法，块引用解析不到时会不显示
+        this.ctx.ops.insertLines(block.editor, [`[[${file.basename}#^${id}]]`], block.end + 1);
+        new Notice(`已插入块引用 #^${id}`);
+      });
     });
-    // 嵌入行落在块后：结构化块的 ID 独立成行时取该行，否则取块末行
-    const anchor =
-      this.needsOwnLine({ editor, file, start: block.start, end: block.end, type: block.type }) &&
-      this.findOwnLineIdLine(editor, block.end) !== null
-        ? (this.findOwnLineIdLine(editor, block.end) as number)
-        : block.end;
-    const link = `![[${file.basename}#^${id}]]`;
-    editor.replaceRange('\n' + link + '\n', {
-      line: anchor,
-      ch: editor.getLine(anchor).length,
-    });
-    editor.setCursor({ line: anchor + 1, ch: link.length });
-    editor.focus();
-    this.ctx.handle.hideHandle();
-    new Notice(`已插入嵌入块 #^${id}`);
   }
 
   // 清掉全文的块 ID（独立成行的和句尾的），破坏性操作先确认

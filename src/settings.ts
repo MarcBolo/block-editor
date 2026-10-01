@@ -2,6 +2,9 @@ import { PluginSettingTab, Setting } from 'obsidian';
 import type BlockEditorPlugin from './main';
 import { recomputeColumnsEditors } from './columns-preview';
 
+/** 点击内部链接时的打开位置；'current' 表示沿用 Obsidian 原生行为 */
+export type LinkOpenMode = 'current' | 'tab' | 'split' | 'window';
+
 export interface BlockEditorSettings {
   /** 显示块手柄 */
   showHandle: boolean;
@@ -29,6 +32,8 @@ export interface BlockEditorSettings {
   handleSize: number;
   /** 拖拽判定阈值（px），小于该位移视为点击 */
   dragThreshold: number;
+  /** 点击内部链接时的打开位置 */
+  linkOpenMode: LinkOpenMode;
 }
 
 // 除新增项外，默认值等于重构前的内置行为
@@ -45,6 +50,7 @@ export const DEFAULT_SETTINGS: BlockEditorSettings = {
   columnsBorder: false,
   handleSize: 20,
   dragThreshold: 4,
+  linkOpenMode: 'current',
 };
 
 /** M4：把分栏默认外观 / 手柄尺寸写到 body CSS 变量，styles.css 以 var() 消费。
@@ -131,6 +137,22 @@ export class BlockEditorSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.indentStep = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('点击链接时的打开位置')
+      .setDesc('点击内部链接 [[...]] 时在哪里打开；Ctrl/Cmd+点击等修饰键行为不受影响')
+      .addDropdown((d) =>
+        d
+          .addOption('current', '当前标签页')
+          .addOption('tab', '新标签页')
+          .addOption('split', '分屏（右侧）')
+          .addOption('window', '新窗口（弹出）')
+          .setValue(this.plugin.settings.linkOpenMode)
+          .onChange(async (value) => {
+            this.plugin.settings.linkOpenMode = value as LinkOpenMode;
             await this.plugin.saveSettings();
           })
       );

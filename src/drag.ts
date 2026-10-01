@@ -1,5 +1,5 @@
 import type { Editor, MarkdownView, TFile } from 'obsidian';
-import type { BlockContext, BlockRange, BlockType, CMDoc, CMView } from './types';
+import type { BlockContext, BlockRange, BlockType, CMView } from './types';
 import type BlockEditorPlugin from './main';
 import { getCM, getIndent, getLines } from './util';
 
@@ -20,6 +20,8 @@ interface DragState {
   edgeSide: -1 | 1 | null;
   /** H4 贴边目标块首行（onMouseUp 时重新取块，拖拽期间文档不变、行号稳定） */
   edgeTargetStart: number | null;
+  /** 拖入普通段落/标题时需「列表化」的目标首行（null 表示非此类嵌套） */
+  listifyTargetLine: number | null;
   startY: number;
   startX: number;
   lastX: number;
@@ -32,12 +34,33 @@ interface DragState {
 /** 分栏外壳标记（拖拽嵌套引用时排除，避免插入点落在分栏内部截断结构） */
 const COL_SHELL_RE = /^\s*>\s*\[!multi-column(?:\|[^\]]*)?\]/;
 
+/** 四向落区：目标块盒左右外缘带的贴边分栏热区宽度上限 */
+const EDGE_BAND = 36;
+/** 窄块时贴边带下限，避免热区过小不可命中 */
+const EDGE_BAND_MIN = 12;
+/** 缩进嵌套热区起点（指针须超过行文本左缘 + NEST_OFFSET 才算嵌套） */
+const NEST_OFFSET = 24;
+/** 嵌套插入的一步缩进字符数（设置里未指定步长时使用） */
+const NEST_INDENT = 4;
+/** 目标为列表 / 引用 / callout 时，左侧贴边带收缩到嵌套起点之前，避免与嵌套争抢 */
+const EDGE_BAND_NESTABLE = NEST_OFFSET - 4;
+/** 可作为缩进嵌套目标（需为其让出边缘热区）的块类型 */
+const NESTABLE_TYPES = ['list', 'quote', 'callout'];
+/** 普通段落 / 标题：Markdown 无父子结构，拖入时把目标「列表化」再嵌套 */
+const LISTIFY_TYPES = ['line', 'heading'];
+
+/** 是否为「缩进为子块」的落点目标（列表/引用/Callout + 需列表化的普通段落/标题） */
+function isNestTarget(type: BlockType): boolean {
+  return NESTABLE_TYPES.includes(type) || LISTIFY_TYPES.includes(type);
+}
+
 /** 拖拽排序：幽灵预览、插入指示线、边缘自动滚动、列表嵌套 / 降级 */
 export class DragController {
   private state: DragState | null = null;
   private ghostEl: HTMLElement | null = null;
   private indicatorEl: HTMLElement | null = null;
   private edgeLineEl: HTMLElement | null = null;
+  private edgeBoxEl: HTMLElement | null = null;
 
   constructor(private ctx: BlockEditorPlugin) {}
 
@@ -53,6 +76,13 @@ export class DragController {
     edgeLine.style.display = 'none';
     document.body.appendChild(edgeLine);
     this.edgeLineEl = edgeLine;
+    // 贴边分栏目标块整体描边（与竖线共同构成「此块将合成分栏」的明确视觉，
+    // 与「横向插入线 = 移动」形成一眼可辨的区分，避免两种落点模式混淆）
+    const edgeBox = document.createElement('div');
+    edgeBox.className = 'block-editor-edge-box';
+    edgeBox.style.display = 'none';
+    document.body.appendChild(edgeBox);
+    this.edgeBoxEl = edgeBox;
   }
 
   destroy(): void {
@@ -62,6 +92,8 @@ export class DragController {
     this.indicatorEl = null;
     this.edgeLineEl?.remove();
     this.edgeLineEl = null;
+    this.edgeBoxEl?.remove();
+    this.edgeBoxEl = null;
     this.state = null;
     document.body.classList.remove('block-editor-dragging');
   }
@@ -104,6 +136,7 @@ export class DragController {
       quotePrefix: null,
       edgeSide: null,
       edgeTargetStart: null,
+      listifyTargetLine: null,
       startY: e.clientY,
       startX: e.clientX,
       lastX: e.clientX,
@@ -127,6 +160,7 @@ export class DragController {
     document.body.classList.remove('block-editor-dragging');
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
     if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
+    if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
 
     if (!ds.moved) {
       // 视为点击 -> 打开块菜单
@@ -140,14 +174,28 @@ export class DragController {
       return;
     }
 
-    // H4 贴边快速分栏：松手时若仍命中贴边热区（同文档），直接把拖动块与
-    // 目标块合成两栏分栏；合成失败（目标已变 / 结构异常）回退普通移动。
+    // 四向落区·贴边分栏：松手时若仍命中贴边热区（同文档），把拖动块与目标块
+    // 合成两栏分栏；合成失败（目标已变 / 结构异常）时 ds.targetLine 仍保留着
+    // 拖拽期间算出的纵向插入点，自然回退到下方的普通移动分支。
     if (ds.edgeSide !== null && ds.edgeTargetStart !== null && ds.targetEditor === null) {
       const t = this.ctx.detector.getBlockAtLine(ds.editor, ds.edgeTargetStart);
       if (t && this.ctx.converter.wrapToEdgeColumns(ds.editor, ds.ranges, t, ds.edgeSide)) {
         this.ctx.handle.hideHandle();
         return;
       }
+    }
+
+    // 普通段落 / 标题嵌套：把目标列表化后插入子项（单步撤销；Alt 为复制）
+    if (ds.listifyTargetLine != null && ds.nestCol != null && ds.targetEditor === null) {
+      this.ctx.ops.nestUnderPlainBlock(
+        ds.editor,
+        ds.ranges,
+        ds.listifyTargetLine,
+        ds.nestCol,
+        e.altKey
+      );
+      this.ctx.handle.hideHandle();
+      return;
     }
 
     if (ds.targetLine != null) {
@@ -197,10 +245,31 @@ export class DragController {
     }
     if (!ds.moved) return;
     this.moveGhost(e);
-    this.ghostEl?.classList.toggle('is-copy', e.altKey);
 
     this.updateDropTarget(ds, e.clientX, e.clientY);
+    this.applyActionHint(ds, e.altKey);
     this.updateAutoScroll(ds);
+  }
+
+  // 把「松手会执行什么」写到 ghost 的 data-action，由 styles.css 渲染成跟随光标的动作标签
+  private applyActionHint(ds: DragState, altKey: boolean): void {
+    const el = this.ghostEl;
+    if (!el) return;
+    const action = this.resolveAction(ds, altKey);
+    if (action) el.dataset.action = action;
+    else delete el.dataset.action;
+  }
+
+  // 当前落点对应的动作状态；无有效落点（拖回自身 / 无效区域）返回 null，此时不显示标签
+  private resolveAction(ds: DragState, altKey: boolean): string | null {
+    // 贴边分栏优先：松手直接与目标块合成两栏（该路径不响应 Alt）
+    if (ds.edgeSide === -1) return 'column-left';
+    if (ds.edgeSide === 1) return 'column-right';
+    if (ds.targetLine == null) return null;
+    if (ds.targetEditor !== null) return altKey ? 'copy-cross' : 'move-cross';
+    if (altKey) return 'copy';
+    if (ds.nestCol != null || ds.quotePrefix != null) return 'nest';
+    return 'move';
   }
 
   // 指针是否已经离开源编辑器区域
@@ -233,7 +302,6 @@ export class DragController {
     }
     const cross = !sameDoc;
 
-    const cmRect = cm.dom.getBoundingClientRect();
     const pos = cm.posAtCoords({ x, y });
     if (pos == null) {
       this.clearDropTarget(ds);
@@ -256,43 +324,94 @@ export class DragController {
     // 文档内拖动时，落点落在被拖动范围内不算，否则「拖到自己身上」会莫名多一级缩进
     let nestCol: number | null = null;
     let quotePrefix: string | null = null;
+    let listifyTargetLine: number | null = null;
     const overSelf = !cross && ds.ranges.some((r) => lineIndex >= r.start && lineIndex <= r.end);
     const target = overSelf ? null : this.ctx.detector.getBlockAtLine(editor, lineIndex);
 
-    // H4 贴边分栏热区：水平方向命中目标块左 / 右边缘 ≤ EDGE（20px）时启用。
-    // 与下方缩进热区（要求 x > 行文本起点 + 24px）几何互斥、优先级明确：
-    // 贴边命中后直接 return，不再走嵌套缩进判定，避免「贴边」与「嵌套」误触发。
-    if (target && !cross && this.isEdgeColumnTarget(editor, target)) {
-      const EDGE = 20;
-      const dl = x - lineCoords.left;
-      const dr = lineCoords.right - x;
-      const side: -1 | 1 | null =
-        dl >= -2 && dl <= EDGE && dl <= dr ? -1 : dr >= -2 && dr <= EDGE ? 1 : null;
-      if (side !== null) {
-        ds.edgeSide = side;
-        ds.edgeTargetStart = target.start;
-        ds.targetLine = null;
-        ds.nestCol = null;
-        ds.quotePrefix = null;
-        ds.targetEditor = null;
-        this.showEdgeLine(cm, doc, target, side);
-        return;
+    // 嵌套插入的一步缩进：设置里指定了步长就用设置值，否则固定 4 个字符
+    const indentStep = this.ctx.settings.indentStep > 0 ? this.ctx.settings.indentStep : NEST_INDENT;
+    // 被拖动块首行的文本左缘。嵌套门槛以它为基准（而非落点行文本左缘）：
+    // 手柄位于文本左侧，从手柄垂直拖动时指针 x 恒小于「自身文本起点 + NEST_OFFSET」，
+    // 因此上下移动途中不会被判成缩进 —— 保证块能稳定上下重排。
+    let dragTextLeft: number | null = null;
+    if (!cross) {
+      const firstRange = [...ds.ranges].sort((a, b) => a.start - b.start)[0];
+      const firstCoords = cm.coordsAtPos(doc.line(firstRange.start + 1).from);
+      dragTextLeft = firstCoords ? firstCoords.left : null;
+    }
+
+    // 四向落区：以目标块可视盒为锚点划分落点，两种意图几何互斥、一眼可辨——
+    //   左右外缘带 → 贴边分栏（竖线 + 目标块描边）；其余位置 → 移动（横向插入线）。
+    // 两道闸门保证边界清晰（不再与「移动」混淆）：
+    //   1) 纵向：指针须落在目标块垂直范围内 —— 块与块之间的空隙一律回退移动；
+    //   2) 横向：指针须落在块盒左 / 右外缘带内（带以块盒为基准，与悬停高亮块一致）。
+    // 目标为列表 / 引用 / callout 时，左侧带收缩到嵌套起点之前，避免与缩进嵌套争抢。
+    if (target && !cross && this.canEdgeColumnSource(ds, target)) {
+      const box = this.blockBox(cm, target);
+      if (box && y >= box.top - 1 && y <= box.bottom + 1) {
+        const width = Math.max(box.right - box.left, 1);
+        const band = Math.max(EDGE_BAND_MIN, Math.min(EDGE_BAND, width * 0.22));
+        // 嵌套目标（列表/引用/Callout/普通段落/标题）两侧热区都收窄，
+        // 给「缩进为子块」让出正文区域
+        const edgeBand = isNestTarget(target.type) ? Math.min(band, EDGE_BAND_NESTABLE) : band;
+        const dl = x - box.left;
+        const dr = box.right - x;
+        const side: -1 | 1 | null =
+          dl >= -2 && dl <= edgeBand && dl <= dr
+            ? -1
+            : dr >= -2 && dr <= edgeBand && dr < dl
+              ? 1
+              : null;
+        if (side !== null) {
+          ds.edgeSide = side;
+          ds.edgeTargetStart = target.start;
+          // 保留纵向插入点作为兜底：贴边合成失败（目标已变 / 结构异常）时不至于整块不动
+          ds.targetLine = insertAt;
+          ds.nestCol = null;
+          ds.quotePrefix = null;
+          ds.targetEditor = null;
+          this.showEdgeLine(side, box);
+          return;
+        }
       }
     }
 
-    if (target && ['list', 'quote', 'callout'].includes(target.type)) {
+    // 未命中贴边热区：清除上一轮可能残留的贴边态与视觉。
+    // 否则指针先经过贴边热区、再移到普通落点时，松手会优先走贴边分栏分支（吞掉嵌套/移动）。
+    if (ds.edgeSide !== null) {
+      ds.edgeSide = null;
+      ds.edgeTargetStart = null;
+      if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
+      if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
+    }
+
+    if (target && isNestTarget(target.type)) {
+      const targetText = editor.getLine(target.start);
+      // 嵌套门槛取「拖动块文本左缘」与「目标行文本左缘」的较大者 + NEST_OFFSET：
+      // - 下限含目标左缘：指针移到目标正文右侧即可嵌套（缩进块拖到较浅目标也能命中，
+      //   若只用拖动块左缘，门槛会被自身缩进推远，表现为「拖到正文右侧不嵌套」）；
+      // - 下限含拖动块左缘：从手柄垂直拖动时指针恒在自身文本左缘之左，不会误判为嵌套。
+      const targetLeft = cm.coordsAtPos(doc.line(target.start + 1).from)?.left ?? lineCoords.left;
+      const nestGate = Math.max(dragTextLeft ?? targetLeft, targetLeft) + NEST_OFFSET;
       // 分栏外壳不作为嵌套目标：拖到外壳行会截断分栏结构
-      const nestable = COL_SHELL_RE.test(editor.getLine(target.start)) ? null : target;
-      const marker = editor.getLine(target.start).match(/^(\s*)([-*+]|\d+[.)])\s+/);
-      if (marker && x > lineCoords.left + 24) {
-        nestCol = marker[1].length + marker[2].length + 1;
-        insertAt = target.end + 1;
-      } else if (nestable && target.type !== 'list') {
-        // 引用 / callout 嵌套：给被拖行统一补一层 `> ` 前缀（保留原缩进）
-        const qm = editor.getLine(target.start).match(/^(\s*)((?:>\s*)+)/);
-        if (qm && x > lineCoords.left + 24) {
-          quotePrefix = qm[1] + qm[2];
+      if (!COL_SHELL_RE.test(targetText) && x > nestGate) {
+        const marker = targetText.match(/^(\s*)([-*+]|\d+[.)])\s+/);
+        if (marker) {
+          // 列表项：缩进为子项
+          nestCol = marker[1].length + indentStep;
           insertAt = target.end + 1;
+        } else if (target.type === 'quote' || target.type === 'callout') {
+          // 引用 / callout 嵌套：给被拖行统一补一层 `> ` 前缀（保留原缩进）
+          const qm = targetText.match(/^(\s*)((?:>\s*)+)/);
+          if (qm) {
+            quotePrefix = qm[1] + qm[2];
+            insertAt = target.end + 1;
+          }
+        } else {
+          // 普通段落 / 标题：Markdown 无父子结构，落点触发「列表化目标」的嵌套
+          nestCol = getIndent(targetText).length + indentStep;
+          listifyTargetLine = target.start;
+          insertAt = target.start + 1;
         }
       }
     }
@@ -320,14 +439,15 @@ export class DragController {
     ds.targetLine = insertAt;
     ds.nestCol = nestCol;
     ds.quotePrefix = quotePrefix;
+    ds.listifyTargetLine = listifyTargetLine;
     ds.targetEditor = cross ? editor : null;
 
-    let left = cmRect.left;
-    let width = cmRect.width;
-    if (nestCol != null || quotePrefix != null) {
-      left = lineCoords.left;
-      width = Math.max(cmRect.right - left, 40);
-    }
+    // 插入线宽度取编辑器「系统行宽」：以内容区（.cm-content，即 Obsidian 可读行宽
+    // 约束后的文本列）为基准整列铺满，不再随目标行/当前块文本长短变化
+    // （否则同一块内各行长短不一，落点指示忽长忽短）。
+    const contentRect = cm.contentDOM.getBoundingClientRect();
+    const left = contentRect.left;
+    const width = Math.max(contentRect.width, 40);
 
     const yPos = insertAt > lineIndex ? lineCoords.bottom : lineCoords.top;
     if (this.indicatorEl) {
@@ -397,34 +517,76 @@ export class DragController {
   private clearDropTarget(ds: DragState): void {
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
     if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
+    if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
     ds.targetEditor = null;
     ds.edgeSide = null;
     ds.edgeTargetStart = null;
+    ds.listifyTargetLine = null;
   }
 
-  /** 贴边分栏目标判定：目标不能是分栏外壳，也不能在分栏内部（避免截断结构） */
+  /** 贴边分栏目标判定：目标不能为空行、不能是分栏外壳，也不能在分栏内部（避免截断结构） */
   private isEdgeColumnTarget(editor: Editor, target: BlockRange): boolean {
+    if (target.type === 'empty') return false;
     if (COL_SHELL_RE.test(editor.getLine(target.start))) return false;
     return !this.ctx.converter.insideColumns(editor, target);
   }
 
-  /** 绘制贴边竖线：覆盖目标块整块高度；side=-1 贴左边缘，1 贴右边缘 */
-  private showEdgeLine(cm: CMView, doc: CMDoc, target: BlockRange, side: -1 | 1): void {
-    const startPos = doc.line(target.start + 1).from;
-    const endPos = doc.line(target.end + 1).to;
-    const rc1 = cm.coordsAtPos(startPos);
-    const rc2 = cm.coordsAtPos(endPos);
-    if (!rc1 || !rc2) return;
+  /** 贴边分栏资格（目标 + 拖动源双向校验，任一不干净即回退普通移动）：
+   *  拖动源不得是分栏外壳 / 位于分栏内部（否则会把整个分栏塞进新栏形成嵌套分栏），
+   *  且不得与目标区间重叠（合成时按 min/max 取范围会吞掉中间内容）。 */
+  private canEdgeColumnSource(ds: DragState, target: BlockRange): boolean {
+    if (!this.isEdgeColumnTarget(ds.editor, target)) return false;
+    for (const r of ds.ranges) {
+      if (r.start <= target.end && target.start <= r.end) return false;
+      if (COL_SHELL_RE.test(ds.editor.getLine(r.start))) return false;
+      if (this.ctx.converter.insideColumns(ds.editor, r)) return false;
+    }
+    return true;
+  }
+
+  /** 目标块的可视盒：与 handle.showHighlight 同一锚点（左 = 首行文本起点，右 = 内容区右缘，
+   *  上 = 首行顶，下 = 末行底）。贴边热区与目标描边都基于它，保证
+   *  「用户看到的悬停高亮块」 == 「贴边分栏的落区」，消除位置口径不一致带来的混淆。 */
+  private blockBox(
+    cm: CMView,
+    block: BlockRange
+  ): { top: number; bottom: number; left: number; right: number } | null {
+    const doc = cm.state.doc;
+    if (block.start < 0 || block.end >= doc.lines) return null;
+    const topC = cm.coordsAtPos(doc.line(block.start + 1).from);
+    const botC = cm.coordsAtPos(doc.line(block.end + 1).to);
+    if (!topC || !botC) return null;
+    return {
+      top: topC.top,
+      bottom: botC.bottom,
+      left: topC.left,
+      right: cm.contentDOM.getBoundingClientRect().right,
+    };
+  }
+
+  /** 绘制贴边分栏视觉：目标块整体描边 + 侧边竖线（side=-1 贴左，1 贴右） */
+  private showEdgeLine(
+    side: -1 | 1,
+    box: { top: number; bottom: number; left: number; right: number }
+  ): void {
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
+    const h = Math.max(2, box.bottom - box.top);
     if (this.edgeLineEl) {
-      const x = side === -1 ? rc1.left : rc2.right;
+      const x = side === -1 ? box.left : box.right;
       this.edgeLineEl.style.display = 'block';
       this.edgeLineEl.style.left = x + 'px';
-      this.edgeLineEl.style.top = rc1.top + 'px';
-      this.edgeLineEl.style.height = Math.max(2, rc2.bottom - rc1.top) + 'px';
+      this.edgeLineEl.style.top = box.top + 'px';
+      this.edgeLineEl.style.height = h + 'px';
+    }
+    if (this.edgeBoxEl) {
+      this.edgeBoxEl.style.display = 'block';
+      this.edgeBoxEl.style.left = box.left + 'px';
+      this.edgeBoxEl.style.top = box.top + 'px';
+      this.edgeBoxEl.style.width = Math.max(box.right - box.left, 8) + 'px';
+      this.edgeBoxEl.style.height = h + 'px';
     }
   }
 

@@ -2,7 +2,7 @@ import { Notice } from 'obsidian';
 import type { Editor } from 'obsidian';
 import type { BlockContext, BlockRange } from './types';
 import type BlockEditorPlugin from './main';
-import { getIndent, getLines, shiftIndent } from './util';
+import { getCM, getIndent, getLines, keepViewport, shiftIndent } from './util';
 
 /** 块操作：移动、删除、插入、缩进、复制内容、创建副本与跨文档搬运 */
 export class BlockOps {
@@ -54,11 +54,15 @@ export class BlockOps {
     const newText = out.join('\n');
     if (oldText === newText) return;
 
-    editor.replaceRange(
-      newText,
-      { line: minLine, ch: 0 },
-      { line: maxLine, ch: editor.getLine(maxLine).length }
-    );
+    // 视口锁定：整段重写会让 CM6 按变更重算视口（移动块/栏/行后整页跳动），
+    // 钉住 scrollTop 让视图停留在当前编辑位置。
+    keepViewport(getCM(editor), () => {
+      editor.replaceRange(
+        newText,
+        { line: minLine, ch: 0 },
+        { line: maxLine, ch: editor.getLine(maxLine).length }
+      );
+    });
   }
 
   // 把 ranges 的副本插入 insertLine 之前（拖拽 + Alt），不移动原块
@@ -98,11 +102,14 @@ export class BlockOps {
     const text = moved.join('\n');
     const total = editor.lineCount();
     const insertAt = Math.min(Math.max(insertLine, 0), total);
-    if (insertAt >= total) {
-      editor.replaceRange('\n' + text, { line: total - 1, ch: editor.getLine(total - 1).length });
-    } else {
-      editor.replaceRange(text + '\n', { line: insertAt, ch: 0 });
-    }
+    // 视口锁定：插入/复制同属编辑操作，视图停在当前编辑位置（不因重算视口跳动）
+    keepViewport(getCM(editor), () => {
+      if (insertAt >= total) {
+        editor.replaceRange('\n' + text, { line: total - 1, ch: editor.getLine(total - 1).length });
+      } else {
+        editor.replaceRange(text + '\n', { line: insertAt, ch: 0 });
+      }
+    });
   }
 
   // 跨文档移动：文本插入目标文档，再从源文档删除。两份文档各产生一步撤销
@@ -126,22 +133,93 @@ export class BlockOps {
   // 自下而上删除行区间，避免行号失效
   removeRanges(editor: Editor, ranges: BlockRange[]): void {
     const sorted = [...ranges].sort((a, b) => b.start - a.start);
-    for (const { start, end } of sorted) {
-      if (end < editor.lineCount() - 1) {
-        editor.replaceRange('', { line: start, ch: 0 }, { line: end + 1, ch: 0 });
-      } else if (start > 0) {
-        editor.replaceRange(
-          '',
-          { line: start - 1, ch: editor.getLine(start - 1).length },
-          { line: end, ch: editor.getLine(end).length }
-        );
-      } else {
-        editor.replaceRange('', { line: 0, ch: 0 }, { line: end, ch: editor.getLine(end).length });
+    // 视口锁定：删除同属编辑操作，视图停在当前编辑位置（不因重算视口跳动）
+    keepViewport(getCM(editor), () => {
+      for (const { start, end } of sorted) {
+        if (end < editor.lineCount() - 1) {
+          editor.replaceRange('', { line: start, ch: 0 }, { line: end + 1, ch: 0 });
+        } else if (start > 0) {
+          editor.replaceRange(
+            '',
+            { line: start - 1, ch: editor.getLine(start - 1).length },
+            { line: end, ch: editor.getLine(end).length }
+          );
+        } else {
+          editor.replaceRange('', { line: 0, ch: 0 }, { line: end, ch: editor.getLine(end).length });
+        }
       }
-    }
+    });
   }
 
-  // 原地复制一份块。副本剥掉块 ID，避免同文出现重复 ID；
+  // 拖入普通段落 / 标题：Markdown 下只有列表项具备父子结构，故把目标首行「列表化」
+  // （加 `- ` 前缀），并把被拖块插入为其缩进子项；被拖块首行若为普通段落（非列表/
+  // 标题/引用/围栏等），同样补 `- ` 使其成为子列表项。整段重写一次，单步撤销。
+  // copy=true 时保留源块（Alt 拖拽）。
+  nestUnderPlainBlock(
+    editor: Editor,
+    ranges: BlockRange[],
+    targetLine: number,
+    nestCol: number,
+    copy: boolean
+  ): void {
+    if (!ranges.length) return;
+    const sources = [...ranges].sort((a, b) => a.start - b.start);
+    // 目标行落在被拖范围内：不处理（防御，正常由调用方保证）
+    if (sources.some((r) => targetLine >= r.start && targetLine <= r.end)) return;
+
+    const minLine = Math.min(targetLine, sources[0].start);
+    const maxLine = Math.max(targetLine, sources[sources.length - 1].end);
+    const span = getLines(editor, minLine, maxLine);
+    const inSource = (abs: number): boolean =>
+      sources.some((r) => abs >= r.start && abs <= r.end);
+
+    const kept: string[] = [];
+    const keptAbs: number[] = [];
+    for (let i = 0; i < span.length; i++) {
+      const abs = minLine + i;
+      if (!copy && inSource(abs)) continue;
+      kept.push(span[i]);
+      keptAbs.push(abs);
+    }
+
+    const tIdx = keptAbs.indexOf(targetLine);
+    if (tIdx < 0) return;
+    // 目标首行列表化：保留缩进与原块标记（如标题 `#`）后加 `- ` 前缀
+    const tLine = kept[tIdx];
+    const tIndent = getIndent(tLine);
+    kept[tIdx] = tIndent + '- ' + tLine.slice(tIndent.length);
+
+    // 被拖行：整体缩进到 nestCol；首行为普通段落时改为「缩进 + `- ` + 正文」
+    // （否则会被 Markdown 当作上一条目的续行而不成独立子块）
+    const moved: string[] = [];
+    for (const r of sources) moved.push(...getLines(editor, r.start, r.end));
+    const base = getIndent(moved[0]).length;
+    const delta = nestCol - base;
+    const listifyMoved = sources[0].type === 'line';
+    for (let i = 0; i < moved.length; i++) {
+      if (i === 0 && listifyMoved) {
+        moved[0] = ' '.repeat(nestCol) + '- ' + moved[0].slice(base);
+      } else if (delta !== 0) {
+        moved[i] = shiftIndent(moved[i], delta);
+      }
+    }
+
+    const out = kept.slice(0, tIdx + 1).concat(moved, kept.slice(tIdx + 1));
+    const oldText = span.join('\n');
+    const newText = out.join('\n');
+    if (oldText === newText) return;
+
+    keepViewport(getCM(editor), () => {
+      editor.replaceRange(
+        newText,
+        { line: minLine, ch: 0 },
+        { line: maxLine, ch: editor.getLine(maxLine).length }
+      );
+    });
+    this.ctx.handle.hideHandle();
+  }
+
+  // 就地复制一份块。副本剥掉块 ID，避免同文出现重复 ID；
   // 块 ID 独立成行时副本插到 ID 行之后，ID 才仍指向原块
   duplicateBlock(block: BlockContext): void {
     const editor = block.editor;

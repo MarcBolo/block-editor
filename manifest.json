@@ -1,7 +1,7 @@
 {
   "id": "block-editor",
   "name": "Block Editor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.4.0",
   "description": "Notion 风格块编辑：块手柄、拖拽排序、多选、类型转换与斜杠命令。",
   "author": "MarcBolo",

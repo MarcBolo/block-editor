@@ -25,6 +25,27 @@ export function shiftIndent(line: string, delta: number): string {
   return ' '.repeat(Math.max(cur + delta, 0)) + line.slice(cur);
 }
 
+/** 视口锁定：在 fn 执行期间钉住 CM 编辑器的滚动位置。
+ *  程序化改文档 / 重建 widget DOM 时，CM6 会按变更重算视口，导致整篇文档滚动条
+ *  跳离当前编辑位置；此处记录并还原 scrollTop（同步 + 下一帧各一次，覆盖 CM6
+ *  测量阶段引起的异步位移），让操作始终停留在当前编辑位置。 */
+export function keepViewport(
+  cm: { scrollDOM: HTMLElement } | null | undefined,
+  fn: () => void
+): void {
+  const sd = cm?.scrollDOM;
+  if (!sd) {
+    fn();
+    return;
+  }
+  const top = sd.scrollTop;
+  fn();
+  if (sd.scrollTop !== top) sd.scrollTop = top;
+  requestAnimationFrame(() => {
+    if (sd.scrollTop !== top) sd.scrollTop = top;
+  });
+}
+
 /** 从 .cm-content DOM 反查所属编辑器与文件 */
 export function getEditorFromContent(
   app: App,

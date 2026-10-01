@@ -1,7 +1,49 @@
+/* ============================================================
+ * block-editor styles.css — 样式隔离说明
+ * 本文件为插件独立样式（非内联），修改后需在 Obsidian 禁用再启用插件生效。
+ *
+ * ── 一、变量依赖与兜底清单 ──────────────────────────────────
+ * 依赖 Obsidian 全局主题变量（主题覆盖后会影响对应外观）：
+ *   高频（≥6 次）：--text-normal(15) 正文色 / --background-modifier-border(10)
+ *     边框与分隔线 / --interactive-accent(10) 交互强调色（悬停、选中、拖拽、
+ *     按钮） / --font-ui-smaller(8) 界面小字号 / --background-modifier-hover(6)
+ *     悬停背景。
+ *   中频：--text-faint(5) 弱化文字 / --text-on-accent(4) 强调底上的文字色 /
+ *     --text-muted(4) 弱化文字 / --background-primary(3) 面板背景 /
+ *     --line-height-normal(3) 正文行高 / --p-spacing(3) 段落间距 /
+ *     --font-monospace(2) 等宽字体 / --background-secondary(2) /
+ *     --text-error(2) 错误色 / --code-background(2) 代码块背景 /
+ *     --code-normal(2) 代码文字色。
+ *   低频：--font-text(2) 正文字体 / --font-ui-small(1) / --text-selection(1) /
+ *     --font-text-size(1) / --radius-m(1) / --size-4-3(1) /
+ *     --checkbox-size(1) 复选框尺寸。
+ *   fallback 说明：--p-spacing / --radius-m / --size-4-3 / --code-normal /
+ *     --line-height-normal(部分) / --code-background(部分) 已带兜底值；
+ *     其余高频变量依赖 Obsidian 标准主题变量存在（未带 fallback），
+ *     主题覆盖后会影响插件外观（属预期内跟随主题），变量缺失时回退
+ *     到浏览器默认，可能导致插件控件观感异常——排查时优先核对以上变量。
+ *
+ * ── 二、!important 策略（共 71 处）──────────────────────────
+ * 【必须区——不可删】因脱离 .markdown-rendered 上下文、主题规则无法
+ *   命中或必须压过主题默认样式的区域：
+ *   1. callout 去 chrome（分栏外壳/源码视图 widget 外层 callout）：
+ *      L467-470、L478-483、L504、L512-513、L524、L553-554、L571-576、L585-588、L594-599、L637、L650、L657-659、L671-675、L680。
+ *   2. widget 渲染态快照兜底（.block-editor-col-content 内脱离阅读
+ *      上下文的排版对齐）：代码块 L723-726、L731-734、复选框与列表负 margin 归零
+ *      L751-752、L804-805、L810-811、L820-821、L838-839、widget 子栏圆角 L846-847。
+ * 【可去区——保留但勿删错】编辑态/插件 UI 自身规则，压 Obsidian 控件
+ *   默认样式或同文件内规则竞争：L139（拖拽光标）、L210-212、L217（编辑态
+ *   容器边框）、L268-272、L278-281（编辑态 textarea 去默认边框/白底/outline/
+ *   阴影）、L439（widget display:flex）。此区删除前需逐条验证视觉
+ *   无回归，不建议批量移除。
+ * 维护红线：新增规则禁止随意加 !important；必须区删除前需跑回归脚本
+ * （block-color-spec.cjs / cm6-lineat-spec.cjs / 分栏相关 spec）。
+ * ============================================================ */
+
 .block-editor-handle {
   position: fixed;
-  width: 20px;
-  height: 20px;
+  width: var(--be-handle-size, 20px);
+  height: var(--be-handle-size, 20px);
   display: none;
   align-items: center;
   justify-content: center;
@@ -49,15 +91,50 @@
   opacity: 0.95;
 }
 
-/* Alt 拖拽 = 复制时，ghost 右侧的提示徽标 */
-.block-editor-drag-ghost.is-copy::after {
-  content: '复制';
-  margin-left: 8px;
+/* 拖动动作提示：ghost 上的标签实时显示「松手会执行什么」，消除对拖动结果的猜测。
+   文案由 data-action 决定，未命中任何动作（拖回自身 / 无效区域）时无该属性、不显示。
+   用 ::before 放在文本前：ghost 有 max-width + overflow:hidden，长文本会把尾部
+   徽标裁掉，放前面才能保证任何块内容下都可见。 */
+.block-editor-drag-ghost[data-action]::before {
+  margin-right: 8px;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--interactive-accent);
   color: var(--text-on-accent);
   font-size: var(--font-ui-smaller);
+}
+
+.block-editor-drag-ghost[data-action='move']::before {
+  content: '移动';
+}
+.block-editor-drag-ghost[data-action='nest']::before {
+  content: '缩进为子块';
+}
+.block-editor-drag-ghost[data-action='copy']::before {
+  content: '复制（Alt）';
+}
+.block-editor-drag-ghost[data-action='move-cross']::before {
+  content: '移动到其他文档';
+}
+.block-editor-drag-ghost[data-action='copy-cross']::before {
+  content: '复制到其他文档（Alt）';
+}
+.block-editor-drag-ghost[data-action='column-left']::before {
+  content: '分栏 · 左';
+}
+.block-editor-drag-ghost[data-action='column-right']::before {
+  content: '分栏 · 右';
+}
+
+/* 分栏类动作：ghost 边框改虚线 accent，与移动的实线边框在形态上区分 */
+.block-editor-drag-ghost[data-action^='column'] {
+  border-color: var(--interactive-accent);
+  border-style: dashed;
+}
+
+/* 带标签时放宽上限，避免「复制到其他文档（Alt）」这类长文案被挤掉 */
+.block-editor-drag-ghost[data-action] {
+  max-width: 460px;
 }
 
 .block-editor-indicator {
@@ -93,6 +170,9 @@
   z-index: 998;
 }
 
+/* 拖拽全局态：body.block-editor-dragging 为插件运行时专属 class（main.ts
+   拖拽期间挂到 body），命名已带插件前缀，不会命中第三方页面元素；保持现状，
+   不套 be-columns-live-on 前缀（拖拽与分栏开关相互独立）。 */
 body.block-editor-dragging {
   cursor: grabbing !important;
 }
@@ -120,6 +200,8 @@ body.block-editor-dragging .cm-content {
   display: flex;
   align-items: stretch;
   gap: 0;
+  /* H3 窄屏响应式堆叠：编辑态行内放不下时同样换行 */
+  flex-wrap: wrap;
 }
 
 /* 拖拽调宽分隔条 */
@@ -154,17 +236,23 @@ body.block-editor-dragging .cm-content {
 
 /* 栏容器：手柄 + 文本区（flex: 1 1 0 为无宽度元数据时的均分兜底，
    与 render() 内联的权重式 flex 配合，避免栏宽退化为内容宽）。
-   简洁风：移除卡片背景/边框/圆角/阴影，背景与页面一致（同阅读模式） */
+   简洁风：移除卡片背景/边框/圆角/阴影，背景与页面一致（同阅读模式）。
+   min-width 240px：H3 窄屏响应式堆叠的断点基准（行内放不下时 wrap 到下一行） */
 .block-editor-col-editor {
   display: flex;
   flex-direction: column;
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 240px;
   padding: 4px 6px;
   background: transparent;
   border: none !important; /* 容器不描边，防主题默认边框 */
   border-width: 0 !important;
   border-radius: 0 !important; /* 容器直角：去主题默认圆角，视觉更简洁 */
+}
+
+/* H1 border 参数：widget 带该 class 时给编辑态栏描边（覆盖上方 border:none） */
+.block-editor-columns-widget.block-editor-columns-border .block-editor-col-editor {
+  border: 1px solid var(--background-modifier-border) !important;
 }
 
 /* 拖拽排序手柄 */
@@ -194,9 +282,33 @@ body.block-editor-dragging .cm-content {
 .block-editor-col-content {
   flex: 1;
   min-height: 28px;
+  /* 强制继承主题正文行高，防止 CM6 编辑器或主题对内部元素设置更大的行高 */
+  line-height: var(--line-height-normal, 1.5);
+  /* 关键修复：CM6 的 .cm-content 设了 white-space: break-spaces，widget 作为其
+     后代继承该属性。break-spaces 会保留 MarkdownRenderer 输出中块级元素之间的
+     换行符，把 <p>/<li> 之间的每个 \n 渲染成一整行空行（约 1 行高），表现为
+     段落、列表项、待办项之间的间距异常大（实测相邻 li 间距 51px = 26px 内容
+     + 25.5px 空行）。此处显式恢复 normal，让块级元素之间的换行正常折叠。
+     代码块由下方 pre { white-space: pre-wrap } 单独恢复，不受影响。 */
+  white-space: normal;
 }
 
-.block-editor-col-content.block-editor-col-empty {
+/* 全局垂直间距归零：widget 内所有元素的上下 margin/padding 强制归零，
+   使分栏内段间距/列表项间距与主题行距一致（用户诉求：与全站行间距统一）。
+   说明：分栏间距过大的主因是 white-space 继承（见上方 .block-editor-col-content
+   的说明）；此处的 margin/padding 归零用于消除浏览器默认段落 margin（p 默认
+   1em）等额外垂直间距，二者缺一不可。具体元素（如代码块）的内边距由下方
+   更具体的选择器单独补回。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content * {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+  padding-block-start: 0 !important;
+  padding-block-end: 0 !important;
+  line-height: inherit !important;
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content.block-editor-col-empty {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -213,7 +325,11 @@ body.block-editor-dragging .cm-content {
 .block-editor-col-textarea {
   width: 100%;
   min-height: 90px;
-  flex: 1;
+  /* 高度完全由 JS 依据内容显式设置（autosizeTextarea，见 columns-preview.ts）：
+     flex 不参与尺寸计算（basis:auto 取显式高度、grow/shrink 均为 0）。
+     若用 flex:1（basis:0），textarea 对栏高贡献为 0，长内容会被 min-height
+     截成约 3 行，整块高度错误地以最矮的栏为准。 */
+  flex: 0 0 auto;
   resize: vertical;
   border: none !important; /* 边框线宽度归 0，防 Obsidian 主题 textarea 默认边框 */
   border-width: 0 !important;
@@ -387,10 +503,16 @@ body.block-editor-dragging .cm-content {
 /* ===== 分栏：Live Preview 渲染态 widget ===== */
 .block-editor-columns-widget {
   display: flex !important;
-  align-items: stretch;
-  gap: 18px;
+  align-items: var(--be-col-valign, stretch);
+  gap: var(--be-col-gap, 18px);
   margin: 4px 0;
   width: 100%;
+  /* viewport 行高防御：MarkdownRenderer 异步填充完成前保持最小可见高度，
+     防止 CM6 把 widget 当 0 高块导致 posAtCoords 行映射越界（与
+     ColumnsWidget.estimatedHeight 对齐） */
+  min-height: 48px;
+  /* H3 窄屏响应式堆叠：容器换行，行内放不下时自动纵向堆叠 */
+  flex-wrap: wrap;
 }
 
 /* row 必须占满 widget 可用宽：widget 是 flex 容器时 row 是 flex item，
@@ -398,17 +520,23 @@ body.block-editor-dragging .cm-content {
 .block-editor-columns-widget > .block-editor-columns-row {
   flex: 1 1 0;
   min-width: 0;
+  /* H3 窄屏响应式堆叠：行内栏同样可换行 */
+  flex-wrap: wrap;
+  gap: var(--be-col-gap, 18px);
 }
 
-/* 防止 Obsidian 的 callout 容器在 widget 外再套一层框 */
-.markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout {
+/* 防止 Obsidian 的 callout 容器在 widget 外再套一层框。
+   作用域收窄：widget 仅在 live-on 渲染（columns-preview.ts：开关关闭
+   不渲染 widget），:has(.block-editor-columns-widget) 在 live-off 本不
+   匹配，补 body.be-columns-live-on 前缀不改变任何行为，只做显式隔离。 */
+body.be-columns-live-on .markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout {
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
   padding: 0 !important;
 }
 
-.markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout > .callout-title {
+body.be-columns-live-on .markdown-source-view .cm-callout:has(.block-editor-columns-widget) > .callout > .callout-title {
   display: none;
 }
 
@@ -430,21 +558,25 @@ body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-title:h
   display: flex;
 }
 
-/* 内容横向排：仅外壳直接内容容器（> 收紧），不命中子栏的 callout-content */
+/* 内容横向排：仅外壳直接内容容器（> 收紧），不命中子栏的 callout-content。
+   gap / align-items 用 CSS 变量（M4 设置默认值；外壳参数由回放脚本写内联覆盖）；
+   flex-wrap 为 H3 窄屏响应式堆叠 */
 body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-content {
   display: flex;
-  align-items: stretch;
-  gap: 18px;
+  align-items: var(--be-col-valign, stretch);
+  gap: var(--be-col-gap, 18px);
+  flex-wrap: wrap;
   /* 收敛潜在垂直 padding（主题若给 callout-content 默认 padding 会放大上下间距） */
   padding: 0 !important;
 }
 
-/* 阅读模式专用：外壳上下间距 1em（不再左右缩进），外壳与子栏圆角统一 5px。
+/* 阅读模式专用：外壳上下间距 1em（不再左右缩进），外壳与子栏圆角统一。
+   圆角值读 CSS 变量（M4 设置默认；外壳 radius= 参数由回放脚本写内联覆盖）。
    仅限 reading/preview 视图，不影响 Live Preview widget */
 body.be-columns-live-on .markdown-reading-view .callout[data-callout='multi-column'],
 body.be-columns-live-on .markdown-preview-view .callout[data-callout='multi-column'] {
   margin: 1em 0 !important;
-  border-radius: 5px !important;
+  border-radius: var(--be-col-radius, 5px) !important;
 }
 
 body.be-columns-live-on .markdown-reading-view
@@ -455,7 +587,7 @@ body.be-columns-live-on .markdown-preview-view
   .callout[data-callout='multi-column']
   .callout-content
   > .callout {
-  border-radius: 5px !important;
+  border-radius: var(--be-col-radius, 5px) !important;
 }
 
 /* 阅读模式专用：子栏内部文字距背景色边缘 +5px。
@@ -508,17 +640,31 @@ body.be-columns-live-on .markdown-source-view
 
 /* 栏：兼容直接子级与容器包装（.cm-callout）两种结构，去 chrome 并均分。
    背景用无 !important 的 background-color（非 shorthand）兜底透明：
-   阅读模式 MarkdownPostProcessor 按 `[!col|bg=#xxxxxx]` 设置的内联 background-color 才能覆盖 */
+   阅读模式 MarkdownPostProcessor 按 `[!col|bg=#xxxxxx]` 设置的内联 background-color 才能覆盖
+   min-width 240px：H3 窄屏响应式堆叠的断点基准 */
 body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout,
 body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout {
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 240px;
   background-color: transparent;
   background-image: none;
   border: none !important;
   box-shadow: none !important;
   padding: 0 !important;
   margin: 0 !important;
+}
+
+/* 实时预览渲染态：.cm-callout 内层还有一层 .callout（子栏本体），
+   必须一并去 chrome（snippet 全局 .callout{padding:5px} 会作用到它，
+   且 Obsidian 默认 callout 有左侧边框），否则左右 padding 叠加不对称。
+   背景用无 !important 的 background-color 兜底透明，不覆盖内联背景色 */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout {
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background-color: transparent;
+  background-image: none;
 }
 
 body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout > .callout-title,
@@ -560,4 +706,407 @@ body.be-columns-live-on .markdown-source-view
   overflow: hidden;
   font-size: 0;
   color: transparent;
+}
+
+/* ===== 分栏：H1 border 参数 / 阅读模式回放 class ===== */
+/* 外壳写了 border 参数（或设置默认开）时，回放脚本给子栏加 .be-col-border，
+   此处描边（覆盖上方子栏去 chrome 的 border:none） */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout.be-col-border,
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout.be-col-border > .callout {
+  border: 1px solid var(--background-modifier-border) !important;
+}
+
+/* M4 默认边框：设置 columnsBorder=true 时（--be-col-border=1px）给子栏描边。
+   优先级低于参数化 class（同特异性后者覆盖），且仅作用于阅读模式/原生渲染的 callout */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout,
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout {
+  border-style: solid !important;
+  border-color: var(--background-modifier-border) !important;
+  border-width: var(--be-col-border, 0px) !important;
+}
+
+/* ===== 分栏：H2 二维行 colrow 行标记（阅读模式 / 原生渲染） ===== */
+/* colrow 强制整行换行占位：flex 1 0 100% 让它独占一行，height 0 隐藏自身。
+   内容整体隐藏（标题、正文都不渲染），仅作为行分隔点 */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout[data-callout='colrow'],
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout[data-callout='colrow'] {
+  flex: 1 0 100%;
+  height: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout[data-callout='colrow'] > *,
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout[data-callout='colrow'] > * {
+  display: none !important;
+}
+
+/* ===== H4 拖拽贴边快速分栏：贴边指示竖线 ===== */
+.block-editor-edge-line {
+  position: fixed;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+  box-shadow: 0 0 6px var(--interactive-accent);
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* 四向落区·贴边分栏：目标块整体描边（虚线 accent），提示「此块将与拖动块合成分栏」；
+   与移动时的横向插入线（2px 实线）在形态上明确区分，避免两种落点模式混淆 */
+.block-editor-edge-box {
+  position: fixed;
+  box-sizing: border-box;
+  border: 1px dashed var(--interactive-accent);
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.08);
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+  pointer-events: none;
+  z-index: 999;
+}
+
+/* ===== H5 任意块颜色标记：阅读模式容器标记 ===== */
+/* 阅读模式回放给块容器加 data-block-color 并设背景；文字色取亮度对比。
+   作用域说明：applyBlockColorToDom 在 main.ts:59 无条件执行（早于
+   livePreviewWidget 开关判断），块颜色标记功能独立于分栏开关，故
+   不可套 body.be-columns-live-on 前缀，保持阅读视图作用域。 */
+.markdown-reading-view [data-block-color] {
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+/* span 承载形态（块末行写回产物 <span data-block-color="..."></span>）：
+   空元素自身无文本，display:none 保证阅读模式不产生空白间距、不显示标签
+   原文；颜色由 applyBlockColorToDom 上到父块级容器，span 本身不参与布局。
+   仅命中空 span，用户手写带文本的 span 不受影响。 */
+.markdown-reading-view span[data-block-color]:empty,
+.markdown-source-view span[data-block-color]:empty {
+  display: none;
+}
+
+/* ===== 分栏：实时预览 widget 内代码块与阅读模式样式对齐 ===== */
+/* 根因：ColumnsWidget 由 MarkdownRenderer.render 逐栏渲染快照，widget 容器
+   未处于 .markdown-preview-view / .markdown-reading-view 上下文，主题对阅读
+   模式 pre 的容器化样式（背景/边框/圆角/内边距）无法命中；styles.css 此前
+   也无 widget 内 pre 规则，导致代码块紧凑贴边、无容器感。
+   修复：仅对渲染态 .block-editor-col-content 内的 pre 补齐与阅读模式一致的
+   容器化样式（背景 var(--code-background) #f7f7f7、浅灰边框、约 8px 圆角、
+   约 12px 内边距）。选择器只命中 pre，不影响编辑态 textarea，不影响分栏内
+   文本/图片/列表；分栏外壳与子栏布局不变。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content pre {
+  background-color: var(--code-background, #f7f7f7) !important;
+  border: 1px solid var(--background-modifier-border) !important;
+  border-radius: var(--radius-m, 8px) !important;
+  padding: var(--size-4-3, 12px) !important;
+}
+
+/* pre 内 code 归零，避免主题 inline-code / cm-code 样式叠加破坏卡片容器感 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content pre code {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+
+/* ===== 分栏：实时预览 widget 内待办复选框显示修复 ===== */
+/* 根因：Obsidian 默认 checkbox 使用负 margin（margin-inline-start:
+   calc(var(--checkbox-size) * -1.5)）把复选框拉到 li 行首；阅读模式依赖
+   .markdown-rendered ul { padding-inline-start: 0 } + li { margin-inline-start: 3ch }
+   相互抵消，checkbox 落在行首正常显示。ColumnsWidget 由 MarkdownRenderer.render
+   逐栏渲染快照，widget 容器未处于 .markdown-preview-view / .markdown-rendered
+   上下文，列表缩进规则不命中，而 checkbox 负 margin 仍全局命中，导致复选框
+   向左溢出分栏内容区（.block-editor-col-content 无内边距），再被外层
+   .callout 默认 overflow:hidden 裁切 → 复选框不显示或疑似向左溢出分栏。
+   修复：仅对渲染态 .block-editor-col-content 内的待办复选框将负 margin 归零，
+   改为行内流式排列（margin-inline-end 0.6em 与文本隔开），与阅读模式视觉对齐。
+   选择器只命中 widget 渲染态 checkbox，不影响编辑态 textarea，不影响普通列表。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul > li.task-list-item > p > .task-list-item-checkbox,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul > li.task-list-item > .task-list-item-checkbox {
+  margin-inline-start: 0 !important;
+  margin-inline-end: 0.6em !important;
+  position: relative;
+  top: 0.2em;
+}
+
+/* 同步兜底：widget 渲染态列表缩进与阅读模式一致。
+   采用标准列表布局：ul/ol 给 padding-inline-start 容纳 outside 圆点，
+   li 不再用 margin-inline-start 左移（否则 outside 圆点被挤到 ul 左边缘外、
+   被 callout overflow:hidden 裁切而不可见）。
+   同时归零 ul/ol 自身垂直 margin 与 padding，消除浏览器默认 1em 上下边距
+   及潜在 padding-block 造成的列表前后空隙。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ol {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+  padding-block: 0 !important;
+  padding-inline-start: 1.5em !important;
+  list-style-position: outside !important;
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul {
+  list-style-type: disc !important;
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ol {
+  list-style-type: decimal !important;
+}
+
+/* 显式恢复 li 的 list-item 显示与圆点颜色（widget 脱离 .markdown-rendered
+   上下文，主题/编辑器可能将 ::marker 设为透明或 list-style 设为 '\200B'） */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li {
+  display: list-item !important;
+  margin-inline-start: 0 !important;
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li::marker {
+  color: var(--text-normal) !important;
+}
+
+/* ===== 分栏：实时预览 widget 快照基础排版补齐 ===== */
+/* 根因：ColumnsWidget 快照容器 .block-editor-col-content 不处于
+   .markdown-preview-view / .markdown-rendered 上下文，主题对阅读模式正文的
+   行距（--line-height-normal）、段落间距（--p-spacing）、代码文字色
+   （--code-normal）等基础排版规则均不命中：widget 内文字继承 CM6 编辑器
+   行高（偏紧凑），段落无间距，与阅读模式不一致；同时 span[data-block-color]
+   空元素在阅读/源码视图的 display:none 也不命中，可能产生空白间隙。
+   修复：仅对渲染态 .block-editor-col-content 补齐与阅读模式一致的基础排版，
+   选择器不命中编辑态 textarea、不影响普通列表。
+   行距取主题变量 --line-height-normal，使分栏内文字行距与全站统一；段落间距
+   归零（不再叠加 --p-spacing），令段间距与行距一致，避免分栏内段落之间空隙
+   过大、阅读节奏松散。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content p,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h1,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h2,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h3,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h4,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h5,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h6 {
+  line-height: var(--line-height-normal, 1.5);
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content p {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+}
+
+/* 任务列表项不显示原生圆点（复选框替代） */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li.task-list-item {
+  list-style: none !important;
+}
+
+/* ===== 分栏：widget 内列表项行距收紧（待办行距约 3 倍根因修复） ===== */
+/* 根因：实时预览快照中每个待办项文本位于 li > p 内，主题/默认样式可能给
+   li 内段落叠加垂直 margin，项尾多出整段段落间距，叠加行高后视觉约为
+   正常行高的 3 倍；阅读模式 .markdown-rendered 上下文会将 li 内 p 间距归零
+   （li p { margin: 0 }）使待办项紧凑排列。
+   修复：补阅读模式等效规则——li 自身垂直 margin 与 padding 全归零 + li 内 p
+   垂直 margin 归零。仅命中 widget 渲染态列表项，不影响编辑态 textarea、
+   不影响列表外段落间距，待办项行距与阅读模式一致。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+  padding-block-start: 0 !important;
+  padding-block-end: 0 !important;
+}
+
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li > p,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li p {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+  padding-block-start: 0 !important;
+  padding-block-end: 0 !important;
+}
+
+/* 任意层级兜底：Obsidian 版本间任务列表渲染层级有差异（可能 li 与 p 之间插入
+   包裹层，或待办项整体渲染为 .task-list-item div 而非 li），直接对语义类
+   .task-list-item 归零垂直 margin，确保待办项之间不叠加段落间距 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item > p,
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item p {
+  margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
+  padding-block-start: 0 !important;
+  padding-block-end: 0 !important;
+}
+
+/* 空块颜色 span：widget 快照内补与阅读/源码视图一致的隐藏（防止产生空白间隙） */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content span[data-block-color]:empty {
+  display: none;
+}
+
+/* 代码文字色与阅读模式一致（pre 背景/边框/圆角已有专门规则） */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content pre code {
+  color: var(--code-normal, inherit);
+}
+
+/* 复选框对齐兜底：不依赖 li 直接子级结构（Obsidian 版本间渲染层级有差异），
+   命中 .block-editor-col-content 内任意层级的 checkbox，与上方 li 结构规则
+   互补，保证负 margin 归零、行内流式排列 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item-checkbox {
+  margin-inline-start: 0 !important;
+  margin-inline-end: 0.6em !important;
+}
+
+/* ===== 分栏：widget 子栏圆角与阅读模式对齐 ===== */
+/* 阅读模式子栏 callout 有 var(--be-col-radius) 圆角（默认 5px），而 widget 子栏
+   .block-editor-col-editor 被上方全局规则强制直角（border-radius: 0 !important），
+   导致实时预览分栏直角、阅读模式分栏圆角。补一条同权重 !important 覆盖，仅限 widget。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
+  border-radius: var(--be-col-radius, 5px) !important;
+}
+
+/* ===== 分栏：widget 内代码块自动换行防截断 ===== */
+/* 阅读模式 pre 在 .markdown-rendered 上下文默认 white-space: pre-wrap 自动换行；
+   widget 快照脱离该上下文后 pre 回退浏览器默认 white-space: pre，宽代码/长行
+   溢出分栏被外层裁剪（表现为右侧代码显示不全）。补齐换行与断词，与阅读模式一致。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ===== 分栏：背景色双主题（浅色/深色自动切换） ===== */
+/* 数据模型：子栏内联 --col-bg-light / --col-bg-dark 由阅读模式回放脚本与
+   实时预览 ColumnsWidget 写入（setColBgVars），无背景时移除变量。
+   此处定义 --col-bg 主题作用域：默认取浅色，body.theme-dark 下取深色
+   （无深色时回退浅色）。文字对比色 --col-bg-text 同理：light/dark 各自
+   独立计算（--col-bg-text-light / --col-bg-text-dark），保证两主题下正文
+   可读；链接/代码等仍由各自主题规则覆盖。 */
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .callout[data-callout='col'],
+body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout[data-callout='col'] {
+  --col-bg: var(--col-bg-light, transparent);
+  --col-bg-text: var(--col-bg-text-light, var(--text-normal));
+  background-color: var(--col-bg);
+  color: var(--col-bg-text);
+}
+
+body.be-columns-live-on.theme-dark .callout[data-callout='multi-column'] .callout-content > .callout[data-callout='col'],
+body.be-columns-live-on.theme-dark .callout[data-callout='multi-column'] .callout-content > .cm-callout > .callout[data-callout='col'] {
+  --col-bg: var(--col-bg-dark, var(--col-bg-light, transparent));
+  --col-bg-text: var(--col-bg-text-dark, var(--col-bg-text-light, var(--text-normal)));
+}
+
+/* 实时预览 widget：快照脱离 .markdown-rendered 上下文，需显式补主题作用域规则 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
+  --col-bg: var(--col-bg-light, transparent);
+  --col-bg-text: var(--col-bg-text-light, var(--text-normal));
+  background-color: var(--col-bg);
+  color: var(--col-bg-text);
+}
+
+body.be-columns-live-on.theme-dark .block-editor-columns-widget .block-editor-col-editor {
+  --col-bg: var(--col-bg-dark, var(--col-bg-light, transparent));
+  --col-bg-text: var(--col-bg-text-dark, var(--col-bg-text-light, var(--text-normal)));
+}
+
+/* ===== 块颜色标记：双主题（浅色/深色自动切换） ===== */
+/* 数据模型：元素内联 --be-block-color-light / --be-block-color-dark 由
+   实时预览 CM6 装饰（blockColorField）与阅读模式回放（applyBlockColorToDom）
+   写入（setBlockColorVars）；无 dark 时不设变量，此处回退 light。
+   此处定义 --be-block-color 主题作用域：默认取浅色，body.theme-dark 下
+   取深色（无深色时回退浅色）。文字对比色 --be-block-color-text 同理：
+   light/dark 各自独立计算（--be-block-color-text-light / -dark），命名色
+   不计算对比色时回退主题默认正文色。与分栏背景（--col-bg）同一模式。 */
+
+/* 实时预览：CM6 line 装饰只把 light/dark 具体值写进 .cm-line 内联变量，
+   主题切换作用域在此定义（内联 style 已消费 var(--be-block-color)）。
+   作用域说明：blockColorField 在 main.ts:42 无条件注册，编辑模式颜色
+   标记独立于 live-on 开关，故不可收窄到 body.be-columns-live-on；
+   .cm-line 是 CM6 编辑器行容器专属元素（仅存在于编辑器 DOM），且
+   此处只定义 --be-block-color* 插件专属变量、不声明任何普通样式属性，
+   全局命中无副作用，保持现状。 */
+.cm-line {
+  --be-block-color: var(--be-block-color-light, transparent);
+  --be-block-color-text: var(--be-block-color-text-light, var(--text-normal));
+}
+
+body.theme-dark .cm-line {
+  --be-block-color: var(--be-block-color-dark, var(--be-block-color-light, transparent));
+  --be-block-color-text: var(--be-block-color-text-dark, var(--be-block-color-text-light, var(--text-normal)));
+}
+
+/* 阅读模式：回放脚本写内联变量并打 data-block-color 属性，此处消费 */
+[data-block-color] {
+  --be-block-color: var(--be-block-color-light, transparent);
+  --be-block-color-text: var(--be-block-color-text-light, var(--text-normal));
+  background-color: var(--be-block-color);
+  color: var(--be-block-color-text);
+}
+
+body.theme-dark [data-block-color] {
+  --be-block-color: var(--be-block-color-dark, var(--be-block-color-light, transparent));
+  --be-block-color-text: var(--be-block-color-text-dark, var(--be-block-color-text-light, var(--text-normal)));
+}
+
+/* ===== 分栏：选色浮层折叠式"覆盖深色"入口 ===== */
+/* 展开后设置深色主题下的背景色；清除后恢复自动推导。 */
+.block-editor-col-picker-dark-toggle {
+  border: none;
+  box-shadow: none;
+  border-radius: 50px;
+  padding: 3px 8px;
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.block-editor-col-picker-dark-toggle:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.block-editor-col-picker-dark-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.block-editor-col-picker-dark-body[hidden] {
+  display: none;
+}
+
+.block-editor-col-picker-dark-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.block-editor-col-picker-dark-row input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+
+.block-editor-col-picker-dark-row input[type='text'].is-invalid {
+  border-color: var(--text-error);
+}
+
+.block-editor-col-picker-dark-reset {
+  border: none;
+  box-shadow: none;
+  border-radius: 50px;
+  padding: 3px 8px;
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+
+.block-editor-col-picker-dark-reset:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
 }

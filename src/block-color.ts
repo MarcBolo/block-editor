@@ -6,7 +6,7 @@ import type BlockEditorPlugin from './main';
 // 复用分栏背景的同一套双值结构：仅浅色自动推导深色、可显式覆盖
 import { normalizeColBg, pickContrastText } from './col-bg';
 import type { ColBg } from './col-bg';
-import { guardDecorations, safeDecoCompute } from './cm6-deco-guard';
+import { safeDecoCompute } from './cm6-deco-guard';
 
 /**
  * 块颜色标记语法（写在块首行行尾）：
@@ -217,32 +217,36 @@ function computeBlockColorDecorations(doc: EditorText): DecorationSet {
  * 的 initialized 模式），保证任意初始化路径下首个事务即完成装饰计算。
  */
 export const blockColorField = StateField.define<BlockColorState>({
-  create: () => ({ initialized: false, decorations: Decoration.none }),
+  create: () => {
+    return { initialized: false, decorations: Decoration.none };
+  },
   update(value, tr) {
     // 未初始化（create 阶段拿不到文档）或文档变更时全量重扫；
     // 其余事务（选区 / 滚动 / 配置）不重建，避免每次击键全文档扫描
     try {
       if (value.initialized && !tr.docChanged) return value;
-      return { initialized: true, decorations: computeBlockColorDecorations(tr.state.doc) };
+      const next: BlockColorState = { initialized: true, decorations: computeBlockColorDecorations(tr.state.doc) };
+      return next;
     } catch (e) {
       // CM6 防御：扫描异常不冒泡（对齐 columnsField 的 lastDiagnostics 模式），
       // 保留旧装饰并记诊断，避免装饰异常拖垮整个编辑器
       blockColorDiagnostics.note = e instanceof Error ? e.message : String(e);
-      console.error(LOG_TAG, '[update-error]', e);
       return value;
     }
   },
   provide: (f) =>
     EditorView.decorations.compute(
       [f],
-      safeDecoCompute((state) => state.field(f).decorations, (msg, e) => {
-        blockColorDiagnostics.note = msg;
-        console.error(LOG_TAG, msg, e);
-      })
+      safeDecoCompute(
+        (state) => state.field(f).decorations,
+        (msg) => {
+          blockColorDiagnostics.note = msg;
+        }
+      )
     ),
 });
 
-export function blockColorExtension(_ctx: BlockEditorPlugin): Extension {
+export function blockColorExtension(ctx: BlockEditorPlugin): Extension {
   // 与 columnsExtension 同级最高优先级，避免被原生注释装饰压掉
   return Prec.highest([blockColorField]);
 }
@@ -253,26 +257,8 @@ const BLOCK_TAGS = new Set([
   'LI', 'BLOCKQUOTE', 'PRE', 'TD', 'TH',
 ]);
 
-/** 阅读模式块颜色标记链路：诊断日志前缀（便于开发者控制台过滤） */
+/** 阅读模式块颜色标记链路：告警日志前缀（便于开发者控制台过滤） */
 const LOG_TAG = '[be-block-color]';
-/** 截断显示长文本，避免日志刷屏 */
-function logTrunc(s: string, n = 100): string {
-  return s.length > n ? s.slice(0, n) + '…' : s;
-}
-/** 向上回溯标签链（含 id / class），stop 为边界（不含 stop 自身） */
-function logTagChain(el: HTMLElement | null, stop: HTMLElement | null): string {
-  const parts: string[] = [];
-  let cur = el;
-  while (cur && cur !== stop) {
-    let label = cur.tagName;
-    if (cur.id) label += '#' + cur.id;
-    const cls = typeof cur.className === 'string' ? cur.className.trim() : '';
-    if (cls) label += '.' + cls.split(/\s+/).filter(Boolean).join('.');
-    parts.push(label);
-    cur = cur.parentElement;
-  }
-  return parts.join(' > ') || '(root)';
-}
 
 /**
  * 阅读模式回放：扫描渲染 DOM 中的 `%% block-color:<color> %%` 标记，
@@ -282,10 +268,6 @@ function logTagChain(el: HTMLElement | null, stop: HTMLElement | null): string {
  * HTML 注释节点（<!-- ... -->），而不是文本节点，因此 TreeWalker 必须
  * 同时监听 SHOW_TEXT 与 SHOW_COMMENT 两种节点类型；comment.nodeValue
  * 可能保留也可能剥掉 `%%` 分隔符，两种形态都要兼容。
- *
- * 诊断日志（[be-block-color] 前缀）：覆盖入口、扫描命中、正则来源、
- * 容器回溯与守卫跳过原因、变量/属性写入结果，用于定位列表项阅读模式
- * 不渲染背景色的根因；日志为只读探针，不改变渲染逻辑。
  */
 /**
  * 把颜色上到目标最近的块级容器（span 元素形态与文本/注释形态共用）：
@@ -303,45 +285,15 @@ function applyColorToBlock(
   // 窄化 ColBg.light（string | null）：调用方已确保非空，此处防御并让 TS 收窄
   if (!bg.light) return false;
   let el: HTMLElement | null = node;
-  const walked: string[] = [];
   while (el && el !== root && !BLOCK_TAGS.has(el.tagName)) {
-    walked.push(el.tagName);
     el = el.parentElement;
   }
-  console.log(LOG_TAG, '[walk]', {
-    path: walked.length ? walked.join('>') : '(none)',
-    target: el ? el.tagName : null,
-    isRoot: el === root,
-    rootIsBlockTag: el === root ? BLOCK_TAGS.has(el.tagName) : false,
-    inDone: el ? done.has(el) : false,
-  });
-  if (!el) {
-    console.log(LOG_TAG, '[skip]', { reason: 'no-parent-block', target: null });
-    return false;
-  }
-  if (done.has(el)) {
-    console.log(LOG_TAG, '[skip]', { reason: 'done-set', target: el.tagName });
-    return false;
-  }
-  if (el === root && !BLOCK_TAGS.has(el.tagName)) {
-    console.log(LOG_TAG, '[skip]', { reason: 'root-not-block', target: el.tagName });
-    return false;
-  }
+  if (!el) return false;
+  if (done.has(el)) return false;
+  if (el === root && !BLOCK_TAGS.has(el.tagName)) return false;
   done.add(el);
-  const cls = typeof el.className === 'string' ? el.className.trim() : '';
-  console.log(LOG_TAG, '[apply]', {
-    target: el.tagName + (cls ? '.' + cls.split(/\s+/).filter(Boolean).join('.') : ''),
-    light: bg.light,
-    dark: bg.dark ?? null,
-  });
   setBlockColorVars(el, bg);
   el.setAttribute('data-block-color', bg.light);
-  console.log(LOG_TAG, '[applied]', {
-    dataBlockColor: el.getAttribute('data-block-color'),
-    lightVar: el.style.getPropertyValue('--be-block-color-light'),
-    darkVar: el.style.getPropertyValue('--be-block-color-dark'),
-    textLightVar: el.style.getPropertyValue('--be-block-color-text-light'),
-  });
   return true;
 }
 
@@ -355,14 +307,7 @@ function applyColorToBlock(
  * 元素形态优先处理，done 集合同块去重，三种形态可共存不重复上色。
  */
 export function applyBlockColorToDom(root: HTMLElement): void {
-  console.log(LOG_TAG, '[enter]', {
-    root: root.tagName,
-    rootClass: typeof root.className === 'string' ? root.className : '',
-    childCount: root.childNodes.length,
-  });
   const done = new Set<HTMLElement>();
-  let hitCount = 0;
-  let appliedCount = 0;
 
   // 1) 新形态：扫 [data-block-color] 元素承载。
   // 块级容器自身也可能带该属性（本函数上色结果 / 用户手写），跳过块级
@@ -372,15 +317,9 @@ export function applyBlockColorToDom(root: HTMLElement): void {
     if (BLOCK_TAGS.has(carrier.tagName)) continue;
     const raw = carrier.getAttribute('data-block-color') ?? '';
     if (!raw) continue;
-    hitCount++;
-    console.log(LOG_TAG, '[scan]', {
-      type: 'span',
-      nodeValue: logTrunc(raw),
-      parents: logTagChain(carrier.parentElement, root),
-    });
     const bg = parseBlockColorValue(raw);
     if (!bg?.light) continue;
-    if (applyColorToBlock(carrier, bg, done, root)) appliedCount++;
+    applyColorToBlock(carrier, bg, done, root);
   }
 
   // 2)+3) 存量形态：TreeWalker 扫文本 / 注释节点。
@@ -392,30 +331,14 @@ export function applyBlockColorToDom(root: HTMLElement): void {
   while ((node = walker.nextNode())) {
     const isComment = node.nodeType === Node.COMMENT_NODE;
     const raw = isComment ? node.nodeValue ?? '' : node.textContent ?? '';
-    // 扫描探针：记录所有注释节点 + 含 block-color 的文本节点（含父级标签链）
-    if (isComment || /block-color/i.test(raw)) {
-      console.log(LOG_TAG, '[scan]', {
-        type: isComment ? 'comment' : 'text',
-        nodeValue: logTrunc(raw),
-        parents: logTagChain(node.parentElement, root),
-      });
-    }
     if (raw.length < 4) continue;
-    // 分别尝试两个正则，记录命中来源（匹配语义与原 `??` 等价）
-    const mMain = BLOCK_COLOR_RE.exec(raw);
-    const m = mMain ?? BLOCK_COLOR_COMMENT_RE.exec(raw);
+    // 分别尝试两个正则（匹配语义与原 `??` 等价）
+    const m = BLOCK_COLOR_RE.exec(raw) ?? BLOCK_COLOR_COMMENT_RE.exec(raw);
     if (!m) continue;
-    hitCount++;
-    console.log(LOG_TAG, '[regex]', {
-      raw: logTrunc(raw),
-      matchedBy: mMain ? 'BLOCK_COLOR_RE' : 'BLOCK_COLOR_COMMENT_RE',
-      color: m[1],
-    });
     const bg = parseBlockColorValue(m[1]);
     if (!bg?.light) continue;
     const parent = node.parentElement;
     if (parent && applyColorToBlock(parent, bg, done, root)) {
-      appliedCount++;
       // 文本节点需要移除标记原文；注释节点本身不可见，无需清理
       if (!isComment) {
         const textNode = node as Text;
@@ -424,7 +347,6 @@ export function applyBlockColorToDom(root: HTMLElement): void {
       }
     }
   }
-  console.log(LOG_TAG, '[done]', { hits: hitCount, applied: appliedCount });
 }
 
 /**
@@ -453,7 +375,7 @@ export function openBlockColorPicker(opts: {
 
   const title = document.createElement('div');
   title.className = 'block-editor-col-picker-title';
-  title.textContent = '块颜色标记';
+  title.textContent = '块颜色';
   picker.appendChild(title);
 
   const swatches = document.createElement('div');
@@ -519,7 +441,7 @@ export function openBlockColorPicker(opts: {
 
   const clearBtn = document.createElement('button');
   clearBtn.className = 'block-editor-col-picker-clear';
-  clearBtn.textContent = '清除颜色标记';
+  clearBtn.textContent = '清除块颜色';
   clearBtn.addEventListener('click', () => {
     close();
     onPick(null);
