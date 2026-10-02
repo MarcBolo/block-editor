@@ -30,3 +30,25 @@ export class ConfirmModal extends Modal {
     this.contentEl.empty();
   }
 }
+
+/** 收款码等图片的放大预览：把 Data URI 铺满弹窗，便于手机扫码。Esc / 点击遮罩关闭。 */
+export class ImagePreviewModal extends Modal {
+  constructor(
+    app: App,
+    private src: string,
+    private label: string
+  ) {
+    super(app);
+    this.modalEl.addClass('be-image-preview-modal');
+    this.titleEl.setText(label);
+  }
+
+  onOpen(): void {
+    const box = this.contentEl.createDiv({ cls: 'be-image-preview-box' });
+    box.createEl('img', { cls: 'be-image-preview', attr: { src: this.src, alt: this.label } });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}

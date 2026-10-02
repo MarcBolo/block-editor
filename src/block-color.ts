@@ -499,7 +499,7 @@ export function openBlockColorPicker(opts: {
   onPick: (color: string | null) => void;
 }): void {
   const { x, y, current, onPick } = opts;
-  const picker = document.createElement('div');
+  const picker = createEl('div');
   picker.className = 'block-editor-col-picker';
   picker.style.left = x + 'px';
   picker.style.top = y + 'px';
@@ -512,15 +512,15 @@ export function openBlockColorPicker(opts: {
     if (!picker.contains(ev.target as Node)) close();
   };
 
-  const title = document.createElement('div');
+  const title = createEl('div');
   title.className = 'block-editor-col-picker-title';
   title.textContent = '块颜色';
   picker.appendChild(title);
 
-  const swatches = document.createElement('div');
+  const swatches = createEl('div');
   swatches.className = 'block-editor-col-picker-swatches';
   for (const c of BLOCK_COLOR_PALETTE) {
-    const sw = document.createElement('button');
+    const sw = createEl('button');
     sw.className = 'block-editor-col-picker-swatch';
     sw.style.backgroundColor = c;
     sw.title = c;
@@ -533,9 +533,9 @@ export function openBlockColorPicker(opts: {
   picker.appendChild(swatches);
 
   // 原生取色器 + hex 输入（参照分栏背景选色的交互习惯）
-  const customRow = document.createElement('div');
+  const customRow = createEl('div');
   customRow.className = 'block-editor-col-picker-custom';
-  const colorInput = document.createElement('input');
+  const colorInput = createEl('input');
   colorInput.type = 'color';
   colorInput.className = 'block-editor-col-picker-native';
   colorInput.value = current ?? '#f1f3f5';
@@ -549,9 +549,9 @@ export function openBlockColorPicker(opts: {
     onPick(colorInput.value);
   });
 
-  const hexRow = document.createElement('div');
+  const hexRow = createEl('div');
   hexRow.className = 'block-editor-col-picker-hex';
-  const input = document.createElement('input');
+  const input = createEl('input');
   input.type = 'text';
   input.placeholder = '#RRGGBB';
   input.value = current ?? '';
@@ -559,7 +559,7 @@ export function openBlockColorPicker(opts: {
   input.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') applyHex();
   });
-  const applyBtn = document.createElement('button');
+  const applyBtn = createEl('button');
   applyBtn.className = 'block-editor-col-picker-apply';
   applyBtn.textContent = '应用';
   const applyHex = (): void => {
@@ -578,7 +578,7 @@ export function openBlockColorPicker(opts: {
   customRow.appendChild(hexRow);
   picker.appendChild(customRow);
 
-  const clearBtn = document.createElement('button');
+  const clearBtn = createEl('button');
   clearBtn.className = 'block-editor-col-picker-clear';
   clearBtn.textContent = '清除块颜色';
   clearBtn.addEventListener('click', () => {
@@ -588,5 +588,5 @@ export function openBlockColorPicker(opts: {
   picker.appendChild(clearBtn);
 
   document.body.appendChild(picker);
-  setTimeout(() => window.addEventListener('mousedown', onDocDown, { once: true }), 0);
+  window.setTimeout(() => window.addEventListener('mousedown', onDocDown, { once: true }), 0);
 }

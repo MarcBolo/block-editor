@@ -33,7 +33,7 @@ export function installLinkOpenBridge(app: App, getMode: () => LinkOpenMode): vo
     // 其它插件传入的显式值都原样放行，修饰键行为天然保留。
     const unspecified = newLeaf == null || newLeaf === false;
     const internal = !/^(?:https?|mailto|tel):/i.test(linktext);
-    const next = unspecified && internal && mode !== 'current' ? (mode as PaneType) : newLeaf;
+    const next = unspecified && internal && mode !== 'current' ? mode : newLeaf;
     return fn.call(this, linktext, sourcePath, next, openViewState);
   };
 

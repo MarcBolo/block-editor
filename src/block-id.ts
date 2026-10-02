@@ -19,7 +19,8 @@ export class BlockIdService {
     const id = this.ensureBlockId(block);
     navigator.clipboard
       .writeText(`[[${block.file.basename}#^${id}]]`)
-      .then(() => new Notice(`已生成块 ID #^${id} 并复制链接`));
+      .then(() => new Notice(`已生成块 ID #^${id} 并复制链接`))
+      .catch(() => new Notice('复制块链接失败'));
     this.ctx.handle.hideHandle();
   }
 

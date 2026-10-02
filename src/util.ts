@@ -51,7 +51,7 @@ export function keepViewport(
   const top = sd.scrollTop;
   fn();
   if (sd.scrollTop !== top) sd.scrollTop = top;
-  requestAnimationFrame(() => {
+  window.requestAnimationFrame(() => {
     if (sd.scrollTop !== top) sd.scrollTop = top;
   });
 }

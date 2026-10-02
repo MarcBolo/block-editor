@@ -19,10 +19,7 @@ class ColumnsDiagModal extends Modal {
 
   onOpen(): void {
     const pre = this.contentEl.createEl('pre', { text: this.json });
-    pre.setAttribute(
-      'style',
-      'font-size:12px; white-space:pre-wrap; user-select:text; max-height:60vh; overflow:auto; margin:0;'
-    );
+    pre.classList.add('block-editor-diag-pre');
   }
 
   onClose(): void {
@@ -34,13 +31,11 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
   plugin.addCommand({
     id: 'move-block-up',
     name: '上移当前块',
-    hotkeys: [{ modifiers: ['Alt'], key: 'ArrowUp' }],
     editorCallback: (editor) => plugin.ops.moveCurrentBlock(editor, -1),
   });
   plugin.addCommand({
     id: 'move-block-down',
     name: '下移当前块',
-    hotkeys: [{ modifiers: ['Alt'], key: 'ArrowDown' }],
     editorCallback: (editor) => plugin.ops.moveCurrentBlock(editor, 1),
   });
   plugin.addCommand({
@@ -126,8 +121,8 @@ export function registerCommands(plugin: BlockEditorPlugin): void {
       }
       info.columnsDetection = diag;
       const json = JSON.stringify(info, null, 2);
-      new ColumnsDiagModal(this.app, json).open();
-      navigator.clipboard.writeText(json).then(() => new Notice('诊断信息已同时复制到剪贴板'));
+      new ColumnsDiagModal(plugin.app, json).open();
+      navigator.clipboard.writeText(json).then(() => new Notice('诊断信息已同时复制到剪贴板')).catch(() => new Notice('复制诊断信息失败'));
     },
   });
 

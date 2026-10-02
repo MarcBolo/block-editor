@@ -19,7 +19,7 @@ export class SelectionManager {
   init(): void {
     // 选区层不在 init 时挂入 DOM，renderSelection 时动态挂到当前编辑器的
     // .cm-editor 上：absolute 定位 + overflow:hidden 物理裁剪，不会溢出到标签页栏。
-    const layer = document.createElement('div');
+    const layer = createEl('div');
     layer.className = 'block-editor-selection-layer';
     this.layerEl = layer;
   }
@@ -84,8 +84,6 @@ export class SelectionManager {
     const editorDom = cm.dom;
     const editorRect = editorDom.getBoundingClientRect();
     if (layer.parentElement !== editorDom) editorDom.appendChild(layer);
-    layer.style.position = 'absolute';
-    layer.style.inset = '0';
 
     const doc = cm.state.doc;
     for (const r of sel.ranges) {
@@ -100,12 +98,11 @@ export class SelectionManager {
       const bottom = Math.min(to.bottom - editorRect.top, editorRect.height);
       if (bottom - top < 4) continue;
 
-      const box = document.createElement('div');
+      const box = createEl('div');
       box.className = 'block-editor-selection';
-      box.style.position = 'absolute';
       box.style.top = top + 'px';
       box.style.height = bottom - top + 'px';
-      box.style.left = '0';
+      box.setCssStyles({ left: '0' });
       box.style.width = editorRect.width + 'px';
       layer.appendChild(box);
     }

@@ -140,7 +140,7 @@ export function pickBlock(app: App, file: TFile, onPick: (blockId: string) => vo
       return;
     }
     new BlockSuggest(app, items, onPick).open();
-  });
+  }).catch(() => new Notice('读取笔记失败'));
 }
 
 /** 「含块 ID 的笔记」路径缓存：null 表示尚未扫描过 */
@@ -183,5 +183,5 @@ export function pickNoteWithBlocks(app: App, onPick: (file: TFile) => void): voi
     }
     notesWithBlocks = paths;
     openNoteSuggest(app, paths, onPick);
-  });
+  }).catch(() => new Notice('扫描块 ID 笔记失败'));
 }

@@ -2,20 +2,18 @@ import { Decoration, EditorView, ViewPlugin, WidgetType } from '@codemirror/view
 import type { DecorationSet, ViewUpdate } from '@codemirror/view';
 import { Prec, StateEffect, StateField } from '@codemirror/state';
 import type { Extension, Range, Transaction } from '@codemirror/state';
-import { MarkdownRenderer, editorInfoField, editorLivePreviewField } from 'obsidian';
+import { Component, MarkdownRenderer, editorInfoField, editorLivePreviewField } from 'obsidian';
 import type { App } from 'obsidian';
 import type BlockEditorPlugin from './main';
+import type { BlockEditorSettings } from './settings';
 import { buildColumnsMarkdown } from './convert';
 import { deriveDarkColor, parseColBgMeta, setColBgVars } from './col-bg';
 import type { ColBg } from './col-bg';
 import { getCM, keepViewport, colValignToCss } from './util';
 import { safeDecoCompute } from './cm6-deco-guard';
 
-const DEBUG = false;
-/** 调试日志：控制台按 BE-columns 过滤 */
-function colLog(...args: unknown[]): void {
-  if (DEBUG) console.log('%c[BE-columns]', 'color:#8b5cf6;font-weight:bold', ...args);
-}
+/** 调试日志：评审要求避免 console 日志，保留 no-op 维持调用点 */
+function colLog(..._args: unknown[]): void {}
 
 /** 代码围栏起始行（``` 或 ~~~，3 个及以上）；围栏状态机与扫描循环共用，避免逐行重复构造 */
 const FENCE_RE = /^\s*(`{3,}|~{3,})/;
@@ -112,7 +110,7 @@ function syncTextareaRows(ta: HTMLTextAreaElement): void {
  *  由 syncTextareaRows 的固有高度兜底）。 */
 function autosizeTextarea(ta: HTMLTextAreaElement): void {
   if (!ta.isConnected) return;
-  ta.style.height = 'auto';
+  ta.setCssStyles({ height: 'auto' });
   const h = ta.scrollHeight;
   // 无排版环境（如 jsdom / 元素不可见）scrollHeight 为 0：保持 auto，由 rows 决定固有高度
   if (h > 0) ta.style.height = h + 'px';
@@ -697,7 +695,7 @@ function scanRegionsIn(
 
 /** 非标准 API 的最小声明（Chromium 才有 caretRangeFromPoint，lib.dom 未收录；
  *  注意本文件已 import 了 CodeMirror 的 Range 类型，DOM Range 需写全名） */
-type CaretRangeApi = { caretRangeFromPoint?: (x: number, y: number) => globalThis.Range | null };
+type CaretRangeApi = { caretRangeFromPoint?: (x: number, y: number) => ReturnType<Document['caretRangeFromPoint']> };
 
 /** 环境是否支持坐标 → 文本位置查询（jsdom 等测试环境不支持，需降级） */
 function hasCaretApi(doc: Document): boolean {
@@ -874,7 +872,7 @@ function sentinelize(source: string, activeFrom: number, activeTo: number): stri
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
     // marks[i] = 该下标的字符所属的格式区间（仅标记字符本身，不含区间内容）
-    const marks: (InlineSpan | null)[] = new Array(line.length).fill(null);
+    const marks: (InlineSpan | null)[] = new Array<InlineSpan | null>(line.length).fill(null);
     for (const sp of findInlineSpans(line)) {
       for (let k = 0; k < sp.pre; k++) {
         marks[sp.start + k] = sp;
@@ -943,6 +941,13 @@ function columnsContentKey(
   );
 }
 
+/** 分栏默认外观设置签名：widget 缓存键与 WidgetType.key 共用。设置里改 gap / radius /
+ *  valign / border 任一项都会改变该签名，从而强制重建 widget（内联 align-self、
+ *  边框宽度等随之刷新），避免复用旧 DOM 导致设置不生效。 */
+function settingsAppearanceKey(s: BlockEditorSettings): string {
+  return `#${s.columnsValign}|${s.columnsGap}|${s.columnsRadius}|${s.columnsBorder}`;
+}
+
 class ColumnsWidget extends WidgetType {
   texts: string[] = [];
   widths: number[] = [];
@@ -961,17 +966,20 @@ class ColumnsWidget extends WidgetType {
   /** 进入编辑态前栏的渲染高度：让 textarea 初始高度与渲染态一致，消除切换跳变 */
   private preEditHeight = 0;
   private root: HTMLElement | null = null;
+  /** 快照渲染挂载用的短生命周期组件：每次 renderInner 重建前 unload，避免
+   *  使用主插件实例作 component（生命周期过长会积累泄漏）。 */
+  private renderChild: Component | null = null;
   private parentView: EditorView | null = null;
   private focusCol = -1;
   private menuEl: HTMLElement | null = null;
   private colorPickerEl: HTMLElement | null = null;
 
   /** 内容签名：内容/宽度/背景色/行结构/外观参数变化时装饰层会重建 widget。
-   *  额外纳入设置默认 columnsValign：用户在设置里切换对齐方式时，若仅用
-   *  外壳参数 key 判断会命中缓存、复用旧 DOM，导致内联 alignSelf 不更新。 */
+   *  额外纳入分栏默认外观设置（gap/radius/valign/border）：用户在设置里改动时，
+   *  若仅用外壳参数判断会命中缓存、复用旧 DOM，导致内联 alignSelf、边框不更新。 */
   get key(): string {
     return columnsContentKey(this.texts, this.widths, this.bgs, this.rows, this.opts)
-      + '#' + this.ctx.settings.columnsValign;
+      + settingsAppearanceKey(this.ctx.settings);
   }
 
   /** CM 更新期间禁止 dispatch：事件触发的写回统一延迟到微任务执行 */
@@ -1048,7 +1056,7 @@ class ColumnsWidget extends WidgetType {
 
   toDOM(view: EditorView): HTMLElement {
     this.parentView = view;
-    const wrap = document.createElement('div');
+    const wrap = createEl('div');
     wrap.className = 'block-editor-columns-widget';
     wrap.dataset.regionStart = String(this.region.startPos);
     this.root = wrap;
@@ -1108,6 +1116,23 @@ class ColumnsWidget extends WidgetType {
     keepViewport(this.parentView, () => this.renderInner());
   }
 
+  /** 卸载快照渲染挂载的短生命周期组件并置空（widget 重建 / 弃用时调用） */
+  private disposeRenderChild(): void {
+    if (this.renderChild) {
+      try {
+        this.renderChild.unload();
+      } catch (e) {
+        console.error('[BE-columns] 卸载渲染组件失败', e);
+      }
+      this.renderChild = null;
+    }
+  }
+
+  /** widget 被缓存淘汰 / 文档切换 / 开关关闭时调用：卸载快照渲染组件 */
+  destroy(): void {
+    this.disposeRenderChild();
+  }
+
   /** 结构 / 内容变更后的统一收尾：写回文档 + 重建 DOM。
    *  写回延迟到微任务（CM 更新期间禁止 dispatch）。 */
   private mutate(): void {
@@ -1118,6 +1143,8 @@ class ColumnsWidget extends WidgetType {
   private renderInner(): void {
     const wrap = this.root;
     if (!wrap) return;
+    // 重建 DOM 前卸载上一轮快照渲染挂载的短生命周期组件（避免随主插件实例长期存活）
+    this.disposeRenderChild();
     // 重建 DOM 前注销旧编辑态 textarea 的 selectionchange 监听器（避免泄漏/串扰）
     if (this.editAbort) {
       this.editAbort.abort();
@@ -1136,7 +1163,7 @@ class ColumnsWidget extends WidgetType {
     const rowLens = this.rows.length ? this.rows : [this.texts.length];
     let si = 0;
     for (let ri = 0; ri < rowLens.length; ri++) {
-      const row = document.createElement('div');
+      const row = createEl('div');
       row.className = 'block-editor-columns-row';
       if (ri < rowLens.length - 1) row.classList.add('block-editor-columns-row-mid');
       wrap.appendChild(row);
@@ -1153,14 +1180,14 @@ class ColumnsWidget extends WidgetType {
         const i = si;
         // 栏间分隔条（拖拽调宽），行首栏不加
         if (j > 0) {
-          const resizer = document.createElement('div');
+          const resizer = createEl('div');
           resizer.className = 'block-editor-col-resizer';
           resizer.title = '拖拽调整栏宽';
           resizer.addEventListener('mousedown', (e) => this.startResize(e, i - 1, row, resizer));
           row.appendChild(resizer);
         }
 
-        const col = document.createElement('div');
+        const col = createEl('div');
         col.className = 'block-editor-col-editor';
         // 权重式弹性宽度：分隔条与 ＋ 按钮占固定空间，栏目按权重分享剩余宽度。
         // 无宽度元数据时按栏数均分（否则拼出 'undefined 1 0%' 被浏览器丢弃，栏宽退化为内容宽）
@@ -1175,7 +1202,7 @@ class ColumnsWidget extends WidgetType {
         setColBgVars(col, this.bgs[i]);
 
         // 拖拽排序手柄：拖动排序，点击（位移小于阈值）弹出命令菜单
-        const grip = document.createElement('div');
+        const grip = createEl('div');
         grip.className = 'block-editor-col-grip';
         grip.textContent = '⠿';
         grip.title = '拖动排序；点击打开菜单';
@@ -1186,7 +1213,7 @@ class ColumnsWidget extends WidgetType {
           // 编辑态：textarea，失焦写回。
           // value 为"显示值"：光标不在其中的行内格式标记以等长不可见字符隐藏
           // （初始 activeFrom/activeTo = -1 ⇒ 全部隐藏，落点设置后由 syncMarkerDisplay 还原）
-          const ta = document.createElement('textarea');
+          const ta = createEl('textarea');
           ta.className = 'block-editor-col-textarea';
           ta.value = sentinelize(this.texts[i], -1, -1);
           ta.spellcheck = false;
@@ -1283,7 +1310,7 @@ class ColumnsWidget extends WidgetType {
           }
         } else {
           // 渲染态：MarkdownRenderer 快照，单击文本进入该栏编辑（光标落至点击处附近）
-          const content = document.createElement('div');
+          const content = createEl('div');
           content.className = 'block-editor-col-content';
           content.addEventListener('mousedown', (e) => {
             // 仅左键单击且无修饰键
@@ -1312,15 +1339,16 @@ class ColumnsWidget extends WidgetType {
           if (!this.texts[i] || !this.texts[i].trim()) {
             content.classList.add('block-editor-col-empty');
           } else {
-            MarkdownRenderer.render(this.ctx.app, this.texts[i], content, this.path, this.ctx)
+            if (!this.renderChild) this.renderChild = new Component();
+            MarkdownRenderer.render(this.ctx.app, this.texts[i], content, this.path, this.renderChild)
               .then(() => {
                 // 多级 requestMeasure：立即 + 下一帧 + 300ms（覆盖异步图片/字体
                 // 加载后的高度变化），确保 viewport 行高缓存尽快收敛到真实高度，
                 // 缩短"实测矮高度 → 内容变高"的错位窗口。
                 const rm = (): void => this.parentView?.requestMeasure();
                 rm();
-                requestAnimationFrame(rm);
-                setTimeout(rm, 300);
+                window.requestAnimationFrame(rm);
+                window.setTimeout(rm, 300);
               })
               .catch(() => {
                 content.setText('点击编辑此栏');
@@ -1621,7 +1649,7 @@ class ColumnsWidget extends WidgetType {
   // ---- grip 命令菜单：设置背景色 / 新增栏 / 删除栏（横排纯图标） ----
   /** lucide 风格内联图标（不依赖 Obsidian setIcon，测试环境同样可用） */
   private static iconEl(paths: string[]): SVGSVGElement {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const svg = createSvg('svg');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('width', '14');
     svg.setAttribute('height', '14');
@@ -1631,7 +1659,7 @@ class ColumnsWidget extends WidgetType {
     svg.setAttribute('stroke-linecap', 'round');
     svg.setAttribute('stroke-linejoin', 'round');
     for (const d of paths) {
-      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const p = createSvg('path');
       p.setAttribute('d', d);
       svg.appendChild(p);
     }
@@ -1684,12 +1712,12 @@ class ColumnsWidget extends WidgetType {
   private showColMenu(e: MouseEvent, i: number): void {
     this.closeMenu();
     this.closeColorPicker();
-    const menu = document.createElement('div');
+    const menu = createEl('div');
     menu.className = 'block-editor-col-menu';
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
 
-    const bgBtn = document.createElement('button');
+    const bgBtn = createEl('button');
     bgBtn.className = 'block-editor-col-menu-item';
     bgBtn.title = '设置背景色';
     bgBtn.appendChild(ColumnsWidget.iconEl(ColumnsWidget.ICON_PALETTE));
@@ -1698,7 +1726,7 @@ class ColumnsWidget extends WidgetType {
       this.openColorPicker(i, e.clientX, e.clientY);
     });
 
-    const addBtn = document.createElement('button');
+    const addBtn = createEl('button');
     addBtn.className = 'block-editor-col-menu-item';
     addBtn.title = '新增栏';
     addBtn.appendChild(ColumnsWidget.iconEl(ColumnsWidget.ICON_PLUS));
@@ -1707,7 +1735,7 @@ class ColumnsWidget extends WidgetType {
       this.addColumnAt(i);
     });
 
-    const delBtn = document.createElement('button');
+    const delBtn = createEl('button');
     delBtn.className = 'block-editor-col-menu-item';
     delBtn.title = '删除栏';
     const single = this.texts.length <= 1;
@@ -1722,7 +1750,7 @@ class ColumnsWidget extends WidgetType {
     });
 
     // H2 行列编辑增强：拆分栏 / 合并到下一栏 / 追加一行 / 行上移 / 行下移
-    const splitBtn = document.createElement('button');
+    const splitBtn = createEl('button');
     splitBtn.className = 'block-editor-col-menu-item';
     splitBtn.title = '拆分栏（一栏拆两栏）';
     splitBtn.appendChild(ColumnsWidget.iconEl(ColumnsWidget.ICON_SPLIT));
@@ -1731,7 +1759,7 @@ class ColumnsWidget extends WidgetType {
       this.splitColumnAt(i);
     });
 
-    const mergeBtn = document.createElement('button');
+    const mergeBtn = createEl('button');
     mergeBtn.className = 'block-editor-col-menu-item';
     mergeBtn.title = '合并到下一栏';
     const rowEnd = this.rows.length ? this.rowRange(this.rowIndexOf(i))[1] : this.texts.length;
@@ -1745,7 +1773,7 @@ class ColumnsWidget extends WidgetType {
       this.mergeColumns(i);
     });
 
-    const rowBtn = document.createElement('button');
+    const rowBtn = createEl('button');
     rowBtn.className = 'block-editor-col-menu-item';
     rowBtn.title = '追加一行（与首行同栏数）';
     rowBtn.appendChild(ColumnsWidget.iconEl(ColumnsWidget.ICON_PLUS));
@@ -1755,7 +1783,7 @@ class ColumnsWidget extends WidgetType {
     });
 
     // 删除整行：仅多行时可用（单行禁用，避免把整个分栏删空）
-    const delRowBtn = document.createElement('button');
+    const delRowBtn = createEl('button');
     delRowBtn.className = 'block-editor-col-menu-item';
     delRowBtn.title = this.rows.length > 1 ? '删除整行' : '仅剩 1 行，无法删除整行';
     if (this.rows.length <= 1) delRowBtn.disabled = true;
@@ -1776,7 +1804,7 @@ class ColumnsWidget extends WidgetType {
     // 多行时才提供整行排序（行上移 / 行下移），单行无意义
     if (this.rows.length > 1) {
       const rIdx = this.rowIndexOf(i);
-      const rowUp = document.createElement('button');
+      const rowUp = createEl('button');
       rowUp.className = 'block-editor-col-menu-item';
       rowUp.title = '上移整行';
       if (rIdx === 0) rowUp.disabled = true;
@@ -1786,7 +1814,7 @@ class ColumnsWidget extends WidgetType {
         this.moveRow(rIdx, -1);
       });
 
-      const rowDown = document.createElement('button');
+      const rowDown = createEl('button');
       rowDown.className = 'block-editor-col-menu-item';
       rowDown.title = '下移整行';
       if (rIdx === this.rows.length - 1) rowDown.disabled = true;
@@ -1803,7 +1831,7 @@ class ColumnsWidget extends WidgetType {
     this.menuEl = menu;
 
     // 点击菜单外部关闭（菜单项自身的 mousedown 在 menu 内，不受影响）
-    setTimeout(() => {
+    window.setTimeout(() => {
       window.addEventListener('mousedown', this.onDocMouseDown, { once: true });
     }, 0);
   }
@@ -1814,21 +1842,21 @@ class ColumnsWidget extends WidgetType {
   /** 弹窗选色：预设色板 + 自定义 hex + 无背景色（清除） */
   private openColorPicker(i: number, x: number, y: number): void {
     this.closeColorPicker();
-    const picker = document.createElement('div');
+    const picker = createEl('div');
     picker.className = 'block-editor-col-picker';
     picker.style.left = x + 'px';
     picker.style.top = y + 'px';
 
-    const title = document.createElement('div');
+    const title = createEl('div');
     title.className = 'block-editor-col-picker-title';
     title.textContent = '第 ' + (i + 1) + ' 栏背景色';
     picker.appendChild(title);
 
     // 预设色板
-    const swatches = document.createElement('div');
+    const swatches = createEl('div');
     swatches.className = 'block-editor-col-picker-swatches';
     for (const c of ColumnsWidget.BG_PALETTE) {
-      const sw = document.createElement('button');
+      const sw = createEl('button');
       sw.className = 'block-editor-col-picker-swatch';
       sw.style.backgroundColor = c;
       sw.title = c;
@@ -1841,9 +1869,9 @@ class ColumnsWidget extends WidgetType {
     picker.appendChild(swatches);
 
     // 自定义选色窗：原生颜色选择器（即时预览到 hex 输入框，change 确认写回）
-    const customRow = document.createElement('div');
+    const customRow = createEl('div');
     customRow.className = 'block-editor-col-picker-custom';
-    const colorInput = document.createElement('input');
+    const colorInput = createEl('input');
     colorInput.type = 'color';
     colorInput.className = 'block-editor-col-picker-native';
     colorInput.value = this.bgs[i]?.light ?? '#f1f3f5';
@@ -1858,9 +1886,9 @@ class ColumnsWidget extends WidgetType {
     });
 
     // 自定义 hex 输入
-    const hexRow = document.createElement('div');
+    const hexRow = createEl('div');
     hexRow.className = 'block-editor-col-picker-hex';
-    const input = document.createElement('input');
+    const input = createEl('input');
     input.type = 'text';
     input.placeholder = '#RRGGBB';
     input.value = this.bgs[i]?.light ?? '';
@@ -1868,7 +1896,7 @@ class ColumnsWidget extends WidgetType {
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') applyHex();
     });
-    const applyBtn = document.createElement('button');
+    const applyBtn = createEl('button');
     applyBtn.className = 'block-editor-col-picker-apply';
     applyBtn.textContent = '应用';
     const applyHex = (): void => {
@@ -1889,26 +1917,26 @@ class ColumnsWidget extends WidgetType {
 
     // 折叠式"覆盖深色"入口：展开可设置深色主题下的背景色；清除后恢复自动推导。
     // 显式设置的值写回 `bg-dark=` 落库；自动推导值不落库（读取端按同一算法复现）
-    const darkSection = document.createElement('div');
+    const darkSection = createEl('div');
     darkSection.className = 'block-editor-col-picker-dark';
-    const darkToggle = document.createElement('button');
+    const darkToggle = createEl('button');
     darkToggle.className = 'block-editor-col-picker-dark-toggle';
     darkToggle.textContent = '覆盖深色主题颜色';
     darkToggle.addEventListener('click', () => {
       darkBody.hidden = !darkBody.hidden;
       darkToggle.textContent = darkBody.hidden ? '覆盖深色主题颜色' : '收起深色覆盖';
     });
-    const darkBody = document.createElement('div');
+    const darkBody = createEl('div');
     darkBody.className = 'block-editor-col-picker-dark-body';
     darkBody.hidden = true;
-    const darkRow = document.createElement('div');
+    const darkRow = createEl('div');
     darkRow.className = 'block-editor-col-picker-dark-row';
-    const darkNative = document.createElement('input');
+    const darkNative = createEl('input');
     darkNative.type = 'color';
     darkNative.className = 'block-editor-col-picker-native';
     darkNative.value = this.bgs[i]?.dark ?? '#f1f3f5';
     darkNative.title = '深色主题背景色';
-    const darkInput = document.createElement('input');
+    const darkInput = createEl('input');
     darkInput.type = 'text';
     darkInput.placeholder = '#RRGGBB';
     darkInput.value = this.bgs[i]?.dark ?? '';
@@ -1926,7 +1954,7 @@ class ColumnsWidget extends WidgetType {
       this.closeColorPicker();
       this.applyBgDark(i, v);
     };
-    const darkApply = document.createElement('button');
+    const darkApply = createEl('button');
     darkApply.className = 'block-editor-col-picker-apply';
     darkApply.textContent = '应用';
     darkApply.addEventListener('click', applyDarkHex);
@@ -1937,7 +1965,7 @@ class ColumnsWidget extends WidgetType {
       this.closeColorPicker();
       this.applyBgDark(i, darkNative.value);
     });
-    const darkReset = document.createElement('button');
+    const darkReset = createEl('button');
     darkReset.className = 'block-editor-col-picker-dark-reset';
     darkReset.textContent = '恢复自动推导';
     darkReset.addEventListener('click', () => {
@@ -1954,7 +1982,7 @@ class ColumnsWidget extends WidgetType {
     picker.appendChild(darkSection);
 
     // 清除背景
-    const clearBtn = document.createElement('button');
+    const clearBtn = createEl('button');
     clearBtn.className = 'block-editor-col-picker-clear';
     clearBtn.textContent = '无背景色（清除）';
     clearBtn.addEventListener('click', () => {
@@ -1967,7 +1995,7 @@ class ColumnsWidget extends WidgetType {
     this.colorPickerEl = picker;
 
     // 点击浮层外部关闭
-    setTimeout(() => {
+    window.setTimeout(() => {
       window.addEventListener('mousedown', this.onDocMouseDown, { once: true });
     }, 0);
   }
@@ -2020,6 +2048,7 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
   // 开关关闭或源码模式：不替换为 widget，保留原生 callout（横排与否由 body.be-columns-live-on CSS 控制）
   if (!sharedCtx?.settings.livePreviewWidget || !live) {
     lastDiagnostics.note = !sharedCtx?.settings.livePreviewWidget ? '开关关闭：未渲染 widget' : '源码模式：未渲染 widget';
+    for (const e of widgetCache.values()) e.widget.destroy();
     widgetCache.clear();
     return Decoration.none;
   }
@@ -2047,10 +2076,11 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
       continue;
     }
     used.add(r.startPos);
-    // 缓存键纳入设置默认 columnsValign，与 WidgetType.key 保持一致：
-    // 设置切换对齐方式时强制重建 widget，使内联 alignSelf 及时更新。
+    // 缓存键纳入分栏默认外观设置签名，与 WidgetType.key 保持一致：
+    // 设置改动 gap / radius / valign / border 时强制重建 widget，使内联 alignSelf、
+    // 边框宽度等及时更新。
     const key = columnsContentKey(r.segments, r.widths, r.bgs, r.rows, r.opts)
-      + '#' + sharedCtx!.settings.columnsValign;
+      + settingsAppearanceKey(sharedCtx.settings);
     let entry = widgetCache.get(r.startPos);
     let widget: ColumnsWidget;
     if (entry && entry.path === docId && entry.owner === owner && entry.key === key) {
@@ -2058,6 +2088,8 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
       widget = entry.widget;
       widget.region = r;
     } else {
+      // 旧缓存不匹配（内容/视图/文档变化）：先卸载旧 widget 的渲染组件，避免泄漏
+      if (entry) entry.widget.destroy();
       colLog('创建渲染 widget', { startLine: r.startLine, doc: docId });
       widget = new ColumnsWidget(ctx_of(state), r, docId, owner);
       widgetCache.set(r.startPos, { path: docId, owner, key, widget });
@@ -2067,7 +2099,10 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
   // 清理已消失区间 / 已不属于当前文档或当前视图的缓存
   for (const k of [...widgetCache.keys()]) {
     const e = widgetCache.get(k);
-    if (!e || e.path !== docId || e.owner !== owner || !used.has(k)) widgetCache.delete(k);
+    if (!e || e.path !== docId || e.owner !== owner || !used.has(k)) {
+      if (e) e.widget.destroy();
+      widgetCache.delete(k);
+    }
   }
   return Decoration.set(ranges, true);
 }
@@ -2209,7 +2244,7 @@ const undoViewportGuard = ViewPlugin.fromClass(
       // 微任务：在 CM6 测量（应用原撤销滚动目标）之前派发，抢占 scrollTarget
       queueMicrotask(restore);
       // 下一帧：兜住测量之后才发生的异步滚动
-      requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
         if (Math.abs(sd.scrollTop - top) > 1) restore();
       });
     }

@@ -68,20 +68,17 @@ export class DragController {
     // 指示器 / 贴边线 / 描边盒不在 init 时挂入 DOM，使用时动态挂到目标编辑器的
     // .cm-editor 上：absolute 定位 + overflow:hidden 物理裁剪，不溢出到标签页栏。
     // 拖拽幽灵（ghost）仍挂 body，需高于一切 UI 跟随鼠标。
-    const indicator = document.createElement('div');
+    const indicator = createEl('div');
     indicator.className = 'block-editor-indicator';
-    indicator.style.display = 'none';
     this.indicatorEl = indicator;
     // H4 贴边分栏竖线（横向插入线之上，视觉区分：竖线 = 贴边合成）
-    const edgeLine = document.createElement('div');
+    const edgeLine = createEl('div');
     edgeLine.className = 'block-editor-edge-line';
-    edgeLine.style.display = 'none';
     this.edgeLineEl = edgeLine;
     // 贴边分栏目标块整体描边（与竖线共同构成「此块将合成分栏」的明确视觉，
     // 与「横向插入线 = 移动」形成一眼可辨的区分，避免两种落点模式混淆）
-    const edgeBox = document.createElement('div');
+    const edgeBox = createEl('div');
     edgeBox.className = 'block-editor-edge-box';
-    edgeBox.style.display = 'none';
     this.edgeBoxEl = edgeBox;
   }
 
@@ -158,9 +155,9 @@ export class DragController {
 
     this.ctx.handle.setDragging(false);
     document.body.classList.remove('block-editor-dragging');
-    if (this.indicatorEl) this.indicatorEl.style.display = 'none';
-    if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
-    if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
+    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
+    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
+    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
 
     if (!ds.moved) {
       // 视为点击 -> 打开块菜单
@@ -381,8 +378,8 @@ export class DragController {
     if (ds.edgeSide !== null) {
       ds.edgeSide = null;
       ds.edgeTargetStart = null;
-      if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
-      if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
+      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
+      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
     }
 
     if (target && isNestTarget(target.type)) {
@@ -455,8 +452,7 @@ export class DragController {
     const yPos = insertAt > lineIndex ? lineCoords.bottom : lineCoords.top;
     if (this.indicatorEl) {
       if (this.indicatorEl.parentElement !== editorDom) editorDom.appendChild(this.indicatorEl);
-      this.indicatorEl.style.position = 'absolute';
-      this.indicatorEl.style.display = 'block';
+      this.indicatorEl.setCssStyles({ position: 'absolute', display: 'block' });
       this.indicatorEl.style.top = yPos - editorRect.top + 'px';
       this.indicatorEl.style.left = left + 'px';
       this.indicatorEl.style.width = width + 'px';
@@ -520,9 +516,9 @@ export class DragController {
   }
 
   private clearDropTarget(ds: DragState): void {
-    if (this.indicatorEl) this.indicatorEl.style.display = 'none';
-    if (this.edgeLineEl) this.edgeLineEl.style.display = 'none';
-    if (this.edgeBoxEl) this.edgeBoxEl.style.display = 'none';
+    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
+    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
+    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
@@ -581,7 +577,7 @@ export class DragController {
     box: { top: number; bottom: number; left: number; right: number },
     cm: CMView
   ): void {
-    if (this.indicatorEl) this.indicatorEl.style.display = 'none';
+    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
     // 挂到目标编辑器 .cm-editor，视口坐标转编辑器坐标，overflow:hidden 物理裁剪
     const editorDom = cm.dom;
     const editorRect = editorDom.getBoundingClientRect();
@@ -593,16 +589,14 @@ export class DragController {
     if (this.edgeLineEl) {
       if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
       const x = side === -1 ? left : right;
-      this.edgeLineEl.style.position = 'absolute';
-      this.edgeLineEl.style.display = 'block';
+      this.edgeLineEl.setCssStyles({ position: 'absolute', display: 'block' });
       this.edgeLineEl.style.left = x + 'px';
       this.edgeLineEl.style.top = top + 'px';
       this.edgeLineEl.style.height = h + 'px';
     }
     if (this.edgeBoxEl) {
       if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
-      this.edgeBoxEl.style.position = 'absolute';
-      this.edgeBoxEl.style.display = 'block';
+      this.edgeBoxEl.setCssStyles({ position: 'absolute', display: 'block' });
       this.edgeBoxEl.style.left = left + 'px';
       this.edgeBoxEl.style.top = top + 'px';
       this.edgeBoxEl.style.width = Math.max(right - left, 8) + 'px';
@@ -620,7 +614,7 @@ export class DragController {
     let text = lines.join('\n');
     if (text.length > 300) text = text.slice(0, 300) + ' …';
 
-    const el = document.createElement('div');
+    const el = createEl('div');
     el.className = 'block-editor-drag-ghost';
     el.textContent = text;
     document.body.appendChild(el);

@@ -119,8 +119,14 @@ export function buildColumnsMarkdown(
   segments.forEach((seg, i) => {
     if (i > 0) {
       out.push('>');
-      // 二维行边界：上一栏是行末 → 写 `>> [!colrow]` 行标记
-      if (rowEnds?.includes(i - 1)) out.push('>> [!colrow]');
+      // 二维行边界：上一栏是行末 → 写 `>> [!colrow]` 行标记；标记后必须再补一条
+      // 第 1 层引用分隔行 `>`。否则 `>> [!colrow]` 与下一行首栏的 `>> [!col]` 同属
+      // 一个第 2 层引用块，Obsidian 会把该栏当作 colrow 的内容，阅读模式下被 colrow
+      // 的隐藏规则（height:0 + 子元素 display:none）吞掉，表现为「下一行第一栏丢失」。
+      if (rowEnds?.includes(i - 1)) {
+        out.push('>> [!colrow]');
+        out.push('>');
+      }
     }
     const bg = bgs?.[i];
     if (bg && bg.light) {

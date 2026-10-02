@@ -351,7 +351,7 @@ export class BlockOps {
       const lines = text.split('\n');
       if (lines.length >= 2) text = lines.slice(1, -1).join('\n');
     }
-    navigator.clipboard.writeText(text).then(() => new Notice('已复制块内容'));
+    navigator.clipboard.writeText(text).then(() => new Notice('已复制块内容')).catch(() => new Notice('复制块内容失败'));
     this.ctx.handle.hideHandle();
   }
 }

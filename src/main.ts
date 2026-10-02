@@ -1,5 +1,5 @@
-import { Plugin } from 'obsidian';
-import type { App, TFile } from 'obsidian';
+import { Plugin, TFile } from 'obsidian';
+import type { App } from 'obsidian';
 import { BlockDetector } from './block-detect';
 import { SelectionManager } from './selection';
 import { BlockConverter } from './convert';
@@ -53,9 +53,9 @@ function ownSourceText(
 /** 读取整篇文件文本（源文本兜底用；鸭子类型判断 TFile，避免测试桩缺类时抛错） */
 async function readVaultText(app: App, path: string): Promise<string> {
   const file = app.vault.getAbstractFileByPath(path);
-  if (!file || typeof (file as { extension?: unknown }).extension !== 'string') return '';
+  if (!(file instanceof TFile)) return '';
   try {
-    return await app.vault.cachedRead(file as TFile);
+    return await app.vault.cachedRead(file);
   } catch {
     return '';
   }
@@ -107,7 +107,6 @@ export default class BlockEditorPlugin extends Plugin {
   inserter = new BlockInserter(this);
 
   async onload(): Promise<void> {
-    console.log('[block-editor]', this.manifest.version, 'onload');
     await this.loadSettings();
     document.body.classList.toggle('be-columns-live-on', this.settings.livePreviewWidget);
     // M4：设置默认外观 / 手柄尺寸落到 body CSS 变量（阅读模式原生渲染同样消费）
@@ -411,7 +410,8 @@ export default class BlockEditorPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<BlockEditorSettings> | undefined;
+    this.settings = { ...DEFAULT_SETTINGS, ...data };
   }
 
   async saveSettings(): Promise<void> {

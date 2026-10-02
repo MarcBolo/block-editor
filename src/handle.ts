@@ -18,15 +18,14 @@ export class HandleController {
     // 高亮 / 手柄不在 init 时挂入 DOM，而是在 showHighlight / showHandle 时
     // 动态挂到当前编辑器的 .cm-editor 上：.cm-editor 有 overflow:hidden，
     // absolute 定位的高亮会被物理裁剪在编辑器可视区内，永远不会溢出到标签页栏。
-    const highlight = document.createElement('div');
+    const highlight = createEl('div');
     highlight.className = 'block-editor-hover-block';
-    highlight.style.display = 'none';
     this.highlightEl = highlight;
 
-    const handle = document.createElement('div');
+    const handle = createEl('div');
     handle.className = 'block-editor-handle';
 
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const svg = createSvg('svg');
     svg.setAttribute('class', 'block-editor-handle-dots');
     svg.setAttribute('width', '14');
     svg.setAttribute('height', '14');
@@ -39,7 +38,7 @@ export class HandleController {
       [5, 12],
       [11, 12],
     ]) {
-      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      const circle = createSvg('circle');
       circle.setAttribute('cx', String(cx));
       circle.setAttribute('cy', String(cy));
       circle.setAttribute('r', '1.3');
@@ -47,7 +46,6 @@ export class HandleController {
     }
 
     handle.appendChild(svg);
-    handle.style.display = 'none';
     this.handleEl = handle;
 
     this.ctx.registerDomEvent(handle, 'mousedown', (e) => this.ctx.drag.onHandleMouseDown(e));
@@ -77,7 +75,8 @@ export class HandleController {
       return;
     }
 
-    const cmContent = target.closest('.cm-content') as HTMLElement | null;
+    const cmEl = target.closest('.cm-content');
+    const cmContent = cmEl instanceof HTMLElement ? cmEl : null;
     if (!cmContent) {
       this.scheduleHide();
       return;
@@ -149,8 +148,7 @@ export class HandleController {
 
     if (this.handleEl) {
       if (this.handleEl.parentElement !== editorDom) editorDom.appendChild(this.handleEl);
-      this.handleEl.style.position = 'absolute';
-      this.handleEl.style.display = 'flex';
+      this.handleEl.setCssStyles({ position: 'absolute', display: 'flex' });
       this.handleEl.style.top = top + 'px';
       this.handleEl.style.left = coords.left - editorRect.left - handleSize - 6 + 'px';
     }
@@ -164,7 +162,7 @@ export class HandleController {
 
   hideHandle(): void {
     if (this.ctx.drag.isActive()) return;
-    if (this.handleEl) this.handleEl.style.display = 'none';
+    if (this.handleEl) this.handleEl.setCssStyles({ display: 'none' });
     this.hideHighlight();
     this.currentBlock = null;
   }
@@ -217,8 +215,7 @@ export class HandleController {
       this.hideHighlight();
       return;
     }
-    el.style.position = 'absolute';
-    el.style.display = 'block';
+    el.setCssStyles({ position: 'absolute', display: 'block' });
     el.style.top = top + 'px';
     el.style.height = bottom - top + 'px';
     el.style.left = from.left - editorRect.left + 'px';
@@ -226,7 +223,7 @@ export class HandleController {
   }
 
   private hideHighlight(): void {
-    if (this.highlightEl) this.highlightEl.style.display = 'none';
+    if (this.highlightEl) this.highlightEl.setCssStyles({ display: 'none' });
   }
 
   scheduleHide(): void {

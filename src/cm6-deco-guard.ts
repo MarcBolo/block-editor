@@ -1,6 +1,6 @@
 import { Decoration } from '@codemirror/view';
 import type { DecorationSet } from '@codemirror/view';
-import type { Range } from '@codemirror/state';
+import type { EditorState, Range } from '@codemirror/state';
 
 /**
  * CM6 装饰 range 归一化守卫（防 lineAt 越界逃逸的统一出口）。
@@ -82,12 +82,12 @@ export function guardDecorations(set: DecorationSet, docLength: number): Decorat
  * 下一次事务自动重算恢复。
  */
 export function safeDecoCompute(
-  compute: (state: any) => DecorationSet,
+  compute: (state: EditorState) => DecorationSet,
   log: (msg: string, err?: unknown) => void = () => {}
 ): (state: unknown) => DecorationSet {
   return (state) => {
     try {
-      const set = compute(state);
+      const set = compute(state as EditorState);
       const doc = (state as { doc?: { length?: number } } | null | undefined)?.doc;
       const len = doc && typeof doc.length === 'number' ? doc.length : 0;
       return guardDecorations(set, len);
