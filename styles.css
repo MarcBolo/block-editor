@@ -41,7 +41,7 @@
  * ============================================================ */
 
 .block-editor-handle {
-  position: fixed;
+  position: absolute;
   width: var(--be-handle-size, 20px);
   height: var(--be-handle-size, 20px);
   display: none;
@@ -50,7 +50,8 @@
   border-radius: 4px;
   color: var(--text-faint);
   cursor: grab;
-  z-index: 1000;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 6;
   user-select: none;
   transition: background-color 0.1s ease, color 0.1s ease;
 }
@@ -138,36 +139,41 @@
 }
 
 .block-editor-indicator {
-  position: fixed;
+  position: absolute;
   height: 2px;
   background: var(--interactive-accent);
   border-radius: 1px;
   pointer-events: none;
-  z-index: 1000;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 6;
 }
 
 .block-editor-selection-layer {
-  position: fixed;
+  position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 999;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 5;
 }
 
 .block-editor-selection {
-  position: fixed;
+  position: absolute;
   background: var(--text-selection);
   border-radius: 4px;
   pointer-events: none;
 }
 
-/* 手柄对应块的浅色高亮（只覆盖文本范围，低透明度减弱视觉） */
+/* 手柄对应块的浅色高亮（只覆盖文本范围，低透明度减弱视觉）
+   颜色 / 透明度由 body 上的 --be-hover-color / --be-hover-opacity 驱动，
+   fallback 保留旧版默认值，确保插件未加载时外观不变。 */
 .block-editor-hover-block {
-  position: fixed;
-  background: var(--background-modifier-hover);
-  opacity: 0.55;
+  position: absolute;
+  background: var(--be-hover-color, var(--background-modifier-hover));
+  opacity: var(--be-hover-opacity, 0.55);
   border-radius: 4px;
   pointer-events: none;
-  z-index: 998;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 5;
 }
 
 /* 拖拽全局态：body.block-editor-dragging 为插件运行时专属 class（main.ts
@@ -207,6 +213,10 @@ body.block-editor-dragging .cm-content {
 /* 拖拽调宽分隔条 */
 .block-editor-col-resizer {
   flex: 0 0 8px;
+  /* 分隔条须始终与整行等高：行的 align-items 会随「垂直对齐」设置变为
+     flex-start / center / flex-end，若不显式 stretch，分隔条会塌陷为 0 高，
+     导致竖线不可见、也点不到无法拖拽调宽。align-self 覆盖行的 align-items。 */
+  align-self: stretch;
   cursor: col-resize;
   position: relative;
 }
@@ -243,6 +253,12 @@ body.block-editor-dragging .cm-content {
   flex-direction: column;
   flex: 1 1 0;
   min-width: 240px;
+  /* 栏自身的交叉轴对齐跟随 --be-col-valign：
+     - stretch（默认等高）：栏被拉伸到行高，背景填满；
+     - flex-start / center / flex-end：栏高度 = 内容高度，按上/中/下定位。
+     显式写 align-self 而非只依赖 row 的 align-items，确保非拉伸模式下
+     短栏不会被行高撑满（否则「只有一行内容时栏太高」）。 */
+  align-self: var(--be-col-valign, stretch);
   padding: 4px 6px;
   background: transparent;
   border: none !important; /* 容器不描边，防主题默认边框 */
@@ -504,7 +520,7 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content.b
 .block-editor-columns-widget {
   display: flex !important;
   align-items: var(--be-col-valign, stretch);
-  gap: var(--be-col-gap, 18px);
+  gap: var(--be-col-gap, 10px);
   margin: 4px 0;
   width: 100%;
   /* viewport 行高防御：MarkdownRenderer 异步填充完成前保持最小可见高度，
@@ -520,9 +536,13 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content.b
 .block-editor-columns-widget > .block-editor-columns-row {
   flex: 1 1 0;
   min-width: 0;
+  /* 栏的垂直对齐由 row 的 align-items 决定（栏是 row 的 flex item）；
+     消费 --be-col-valign，使「顶部/居中/底部对齐」在实时预览下生效
+     （widget 容器的 align-items 只影响 row 相对 widget 的位置，不控制栏） */
+  align-items: var(--be-col-valign, stretch);
   /* H3 窄屏响应式堆叠：行内栏同样可换行 */
   flex-wrap: wrap;
-  gap: var(--be-col-gap, 18px);
+  gap: var(--be-col-gap, 10px);
 }
 
 /* 防止 Obsidian 的 callout 容器在 widget 外再套一层框。
@@ -564,7 +584,7 @@ body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-title:h
 body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-content {
   display: flex;
   align-items: var(--be-col-valign, stretch);
-  gap: var(--be-col-gap, 18px);
+  gap: var(--be-col-gap, 10px);
   flex-wrap: wrap;
   /* 收敛潜在垂直 padding（主题若给 callout-content 默认 padding 会放大上下间距） */
   padding: 0 !important;
@@ -576,7 +596,7 @@ body.be-columns-live-on .callout[data-callout='multi-column'] > .callout-content
 body.be-columns-live-on .markdown-reading-view .callout[data-callout='multi-column'],
 body.be-columns-live-on .markdown-preview-view .callout[data-callout='multi-column'] {
   margin: 1em 0 !important;
-  border-radius: var(--be-col-radius, 5px) !important;
+  border-radius: var(--be-col-radius, 8px) !important;
 }
 
 body.be-columns-live-on .markdown-reading-view
@@ -587,7 +607,7 @@ body.be-columns-live-on .markdown-preview-view
   .callout[data-callout='multi-column']
   .callout-content
   > .callout {
-  border-radius: var(--be-col-radius, 5px) !important;
+  border-radius: var(--be-col-radius, 8px) !important;
 }
 
 /* 阅读模式专用：子栏内部文字距背景色边缘 +5px。
@@ -748,26 +768,28 @@ body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content >
 
 /* ===== H4 拖拽贴边快速分栏：贴边指示竖线 ===== */
 .block-editor-edge-line {
-  position: fixed;
+  position: absolute;
   width: 3px;
   border-radius: 2px;
   background: var(--interactive-accent);
   box-shadow: 0 0 6px var(--interactive-accent);
   pointer-events: none;
-  z-index: 1000;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 6;
 }
 
 /* 四向落区·贴边分栏：目标块整体描边（虚线 accent），提示「此块将与拖动块合成分栏」；
    与移动时的横向插入线（2px 实线）在形态上明确区分，避免两种落点模式混淆 */
 .block-editor-edge-box {
-  position: fixed;
+  position: absolute;
   box-sizing: border-box;
   border: 1px dashed var(--interactive-accent);
   border-radius: 4px;
   background: rgba(128, 128, 128, 0.08);
   background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
   pointer-events: none;
-  z-index: 999;
+  /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
+  z-index: 5;
 }
 
 /* ===== H5 任意块颜色标记：阅读模式容器标记 ===== */
@@ -935,6 +957,25 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .
   padding-block-end: 0 !important;
 }
 
+/* ===== 分栏：widget 内 mark 高亮与阅读模式对齐 ===== */
+/* 根因：ColumnsWidget 快照容器 .block-editor-col-content 不处于
+   .markdown-rendered / .markdown-reading-view 上下文，主题对正文高亮的规则
+   （如 Cupertino 限定 .markdown-reading-view/.markdown-source-view/.markdown-rendered
+   mark）无法命中，mark 背景退化为浏览器默认亮黄色，与分栏外正文
+   （--text-highlight-bg 的浅黄色）不一致。
+   修复：仅对渲染态 .block-editor-col-content 补齐与阅读模式等效的 mark 规则，
+   背景统一走 Obsidian 主题变量 --text-highlight-bg，主题修改高亮色时分栏内外
+   同步变化；不命中编辑态 textarea。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content mark {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  border-radius: var(--radius-s, 4px);
+  padding: 2px 4px;
+  color: var(--text-highlight, var(--text-normal));
+  font-weight: var(--font-medium);
+  background-color: var(--text-highlight-bg, #fffb7e);
+}
+
 /* 空块颜色 span：widget 快照内补与阅读/源码视图一致的隐藏（防止产生空白间隙） */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content span[data-block-color]:empty {
   display: none;
@@ -954,11 +995,11 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .
 }
 
 /* ===== 分栏：widget 子栏圆角与阅读模式对齐 ===== */
-/* 阅读模式子栏 callout 有 var(--be-col-radius) 圆角（默认 5px），而 widget 子栏
+/* 阅读模式子栏 callout 有 var(--be-col-radius) 圆角（默认 8px），而 widget 子栏
    .block-editor-col-editor 被上方全局规则强制直角（border-radius: 0 !important），
    导致实时预览分栏直角、阅读模式分栏圆角。补一条同权重 !important 覆盖，仅限 widget。 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
-  border-radius: var(--be-col-radius, 5px) !important;
+  border-radius: var(--be-col-radius, 8px) !important;
 }
 
 /* ===== 分栏：widget 内代码块自动换行防截断 ===== */

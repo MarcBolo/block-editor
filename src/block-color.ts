@@ -91,6 +91,29 @@ export function parseBlockColorValue(raw: string): ColBg | null {
 }
 
 /**
+ * 源文本是否含块颜色标记（span 承载 `data-block-color=` 与存量 `%% block-color:` 两种形态）。
+ * 注意必须同时检测两种形态：只查 `block-color:` 会漏掉 span 形态（用 `=` 而非 `:`）。
+ */
+export function hasBlockColorMarker(source: string): boolean {
+  BLOCK_COLOR_SPAN_RE.lastIndex = 0;
+  const hit = BLOCK_COLOR_SPAN_RE.test(source);
+  BLOCK_COLOR_SPAN_RE.lastIndex = 0;
+  return hit || BLOCK_COLOR_RE.test(source);
+}
+
+/**
+ * 取源文本中第一个块颜色标记的双值颜色（无 / 非法返回 null）。
+ * 用于「元素自身行范围内含标记」时的直接兜底上色。
+ */
+export function firstBlockColor(source: string): ColBg | null {
+  BLOCK_COLOR_SPAN_RE.lastIndex = 0;
+  const sm = BLOCK_COLOR_SPAN_RE.exec(source);
+  BLOCK_COLOR_SPAN_RE.lastIndex = 0;
+  const m = sm ?? BLOCK_COLOR_RE.exec(source);
+  return m ? parseBlockColorValue(m[1]) : null;
+}
+
+/**
  * 把双值颜色写入元素内联 CSS 变量（实时预览 CM6 装饰与阅读模式
  * applyBlockColorToDom 共用；命名色不做对比色计算，由 CSS 回退默认正文色）：
  * - --be-block-color-light / --be-block-color-dark：两主题下背景色（无 dark
@@ -347,6 +370,122 @@ export function applyBlockColorToDom(root: HTMLElement): void {
       }
     }
   }
+}
+
+/** 源文本驱动回放的块级候选：在 BLOCK_TAGS 基础上补 tr（表格行标记整行上色）。 */
+export const SOURCE_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th, tr';
+
+/**
+ * 源文本行 / 渲染文本 → 归一化文本锚点：去掉块前缀（引用 / 标题 / 列表 / 任务框）
+ * 与内联 Markdown 语法（强调 / 行内代码 / 链接 / 表格竖线），并移除全部空白，
+ * 便于与渲染后的 textContent 做「前缀 / 后缀」比对。两侧都走同一归一化，
+ * 因此对正文里出现的这些符号保持一致，不会单侧失配。
+ */
+function normalizeAnchor(raw: string): string {
+  let s = raw;
+  s = s.replace(/^[\s>]+/, '');
+  s = s.replace(/^#{1,6}\s*/, '');
+  s = s.replace(/^(?:[-*+]|\d+[.)])\s+/, '');
+  s = s.replace(/^\[[ xX]?\]\s*/, '');
+  s = s.replace(/!?\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g, (_m: string, a: string, b?: string) => b ?? a);
+  s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
+  s = s.replace(/[*_~`]/g, '');
+  s = s.replace(/==/g, '');
+  s = s.replace(/\|/g, '');
+  s = s.replace(/\s+/g, '');
+  return s;
+}
+
+interface SourceColorEntry {
+  light: string;
+  bg: ColBg;
+  /** 归一化后的行文本锚点（空串 = 标记独占一行，匹配空块） */
+  anchor: string;
+  /** true = %% 存量形态写在块首行（匹配块文本开头）；false = span 写在块末行（匹配结尾） */
+  atStart: boolean;
+}
+
+/**
+ * 阅读模式「源文本驱动」回放（方案 1）：以 ctx.getSectionInfo(el) 拿到的段落
+ * 源文本为准解析标记，再按「文本锚点」把颜色落到渲染后的块级元素上。
+ *
+ * 动机：Obsidian 阅读模式会用自身的 Markdown 渲染器从源文本重建 DOM，自定义
+ * data-* 载体与 %% 注释在重建后可能被丢弃，DOM 形态的 applyBlockColorToDom 便
+ * 扫不到标记；源文本不受该过程影响。
+ *
+ * 匹配规则：源文本按出现顺序、渲染块按文档顺序单调推进；在「连续相邻」的命中
+ * 候选里取最深者（祖先在文档序上先于后代，最深 = 最近的块级容器），既不把颜色
+ * 错落到外层容器，也能跳过中间无标记的块。返回实际上色数（供诊断 / 测试）。
+ */
+export function applyBlockColorFromSource(el: HTMLElement, source: string): number {
+  if (!source) return 0;
+  const entries: SourceColorEntry[] = [];
+  for (const raw of source.split('\n')) {
+    // span 形态（块末行）：行内可存在多个
+    BLOCK_COLOR_SPAN_RE.lastIndex = 0;
+    let hit = false;
+    for (const m of raw.matchAll(BLOCK_COLOR_SPAN_RE)) {
+      const bg = parseBlockColorValue(m[1]);
+      if (!bg?.light) continue;
+      entries.push({ light: bg.light, bg, anchor: normalizeAnchor(raw.replace(BLOCK_COLOR_SPAN_RE, '')), atStart: false });
+      hit = true;
+    }
+    if (hit) continue;
+    // 存量 %% 形态（块首行）
+    const mm = BLOCK_COLOR_RE.exec(raw);
+    if (mm) {
+      const bg = parseBlockColorValue(mm[1]);
+      if (bg?.light) {
+        entries.push({ light: bg.light, bg, anchor: normalizeAnchor(raw.replace(BLOCK_COLOR_RE, '')), atStart: true });
+      }
+    }
+  }
+  if (entries.length === 0) return 0;
+
+  const candidates = Array.from(el.querySelectorAll<HTMLElement>(SOURCE_BLOCK_SELECTOR));
+  if (el.matches(SOURCE_BLOCK_SELECTOR)) candidates.unshift(el);
+  const done = new Set<HTMLElement>();
+  let from = 0;
+  let applied = 0;
+  for (const entry of entries) {
+    let best: HTMLElement | null = null;
+    let bestLen = Infinity;
+    let lastHit = -1;
+    let found = false;
+    for (let i = from; i < candidates.length; i++) {
+      const c = candidates[i];
+      if (done.has(c)) {
+        // 已上色的元素：命中段内视为结束，未命中段内跳过继续找
+        if (found) break;
+        continue;
+      }
+      const t = normalizeAnchor(c.textContent ?? '');
+      const ok = entry.anchor
+        ? entry.atStart
+          ? t.startsWith(entry.anchor)
+          : t.endsWith(entry.anchor)
+        : t === '';
+      if (ok) {
+        found = true;
+        // 取相邻命中段中的「最深」候选（祖先在文档序上先于后代）：li>p、tr>td
+        // 等嵌套下，后代即最近的块级容器，与 DOM 回放的「最近祖先」语义一致
+        if (t.length <= bestLen) {
+          bestLen = t.length;
+          best = c;
+          lastHit = i;
+        }
+      } else if (found) {
+        break;
+      }
+    }
+    if (!best) continue;
+    done.add(best);
+    setBlockColorVars(best, entry.bg);
+    best.setAttribute('data-block-color', entry.light);
+    applied++;
+    from = lastHit + 1;
+  }
+  return applied;
 }
 
 /**

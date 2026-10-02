@@ -1,6 +1,7 @@
 import { PluginSettingTab, Setting } from 'obsidian';
 import type BlockEditorPlugin from './main';
 import { recomputeColumnsEditors } from './columns-preview';
+import { colValignToCss } from './util';
 
 /** 点击内部链接时的打开位置；'current' 表示沿用 Obsidian 原生行为 */
 export type LinkOpenMode = 'current' | 'tab' | 'split' | 'window';
@@ -10,6 +11,12 @@ export interface BlockEditorSettings {
   showHandle: boolean;
   /** 手柄跟随光标所在块 */
   handleFollowsCursor: boolean;
+  /** 悬停时高亮手柄对应的块 */
+  blockHoverHighlight: boolean;
+  /** 悬停高亮颜色（空串表示跟随主题 --background-modifier-hover） */
+  blockHoverHighlightColor: string;
+  /** 悬停高亮透明度（0~1） */
+  blockHoverHighlightOpacity: number;
   /** 启用 / 斜杠命令 */
   slashCommands: boolean;
   /** 拖拽到编辑区边缘自动滚动 */
@@ -40,12 +47,15 @@ export interface BlockEditorSettings {
 export const DEFAULT_SETTINGS: BlockEditorSettings = {
   showHandle: true,
   handleFollowsCursor: true,
+  blockHoverHighlight: true,
+  blockHoverHighlightColor: '',
+  blockHoverHighlightOpacity: 0.55,
   slashCommands: true,
   dragAutoScroll: true,
   indentStep: 0,
-  livePreviewWidget: false,
-  columnsGap: 18,
-  columnsRadius: 5,
+  livePreviewWidget: true,
+  columnsGap: 10,
+  columnsRadius: 8,
   columnsValign: 'stretch',
   columnsBorder: false,
   handleSize: 20,
@@ -59,9 +69,21 @@ export function applyColumnsCssVars(settings: BlockEditorSettings): void {
   const body = document.body;
   body.style.setProperty('--be-col-gap', settings.columnsGap + 'px');
   body.style.setProperty('--be-col-radius', settings.columnsRadius + 'px');
-  body.style.setProperty('--be-col-valign', settings.columnsValign);
+  body.style.setProperty('--be-col-valign', colValignToCss(settings.columnsValign));
   body.style.setProperty('--be-col-border', settings.columnsBorder ? '1px' : '0px');
   body.style.setProperty('--be-handle-size', settings.handleSize + 'px');
+}
+
+/** 块悬停高亮的颜色 / 透明度写到 body CSS 变量，styles.css 以 var() 消费。
+ *  颜色为空串时回退到 Obsidian 主题的 --background-modifier-hover，深浅主题自动跟随。 */
+export function applyHoverHighlightCssVars(settings: BlockEditorSettings): void {
+  const body = document.body;
+  const color = settings.blockHoverHighlightColor.trim();
+  body.style.setProperty(
+    '--be-hover-color',
+    color || 'var(--background-modifier-hover)'
+  );
+  body.style.setProperty('--be-hover-opacity', String(settings.blockHoverHighlightOpacity));
 }
 
 export class BlockEditorSettingTab extends PluginSettingTab {
@@ -93,6 +115,73 @@ export class BlockEditorSettingTab extends PluginSettingTab {
           this.plugin.settings.handleFollowsCursor = value;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName('块悬停高亮')
+      .setDesc('鼠标悬停在块上时，给手柄对应的块加一层浅色高亮背景')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.blockHoverHighlight).onChange(async (value) => {
+          this.plugin.settings.blockHoverHighlight = value;
+          // 关闭后立即抹掉当前已显示的高亮（否则要等鼠标移动才消失）
+          this.plugin.handle.renderHighlight();
+          await this.plugin.saveSettings();
+        })
+      );
+
+    // 高亮颜色：跟随主题开关 + 自定义颜色选择器（跟随主题时禁用选择器）
+    // 注：当前 Obsidian 版本 Setting 无 addColor，故手动挂一个原生 <input type="color">
+    let colorInput: HTMLInputElement | undefined;
+    const colorSetting = new Setting(containerEl)
+      .setName('高亮颜色')
+      .setDesc('自定义悬停高亮的背景色；开启「跟随主题」则使用当前 Obsidian 主题的悬停色')
+      .addToggle((t) => {
+        t
+          .setTooltip('跟随主题颜色')
+          .setValue(this.plugin.settings.blockHoverHighlightColor === '')
+          .onChange(async (value) => {
+            if (value) {
+              this.plugin.settings.blockHoverHighlightColor = '';
+            } else if (colorInput) {
+              // 关闭「跟随主题」时，以颜色选择器当前值作为自定义色
+              this.plugin.settings.blockHoverHighlightColor = colorInput.value;
+            }
+            if (colorInput) colorInput.disabled = value;
+            applyHoverHighlightCssVars(this.plugin.settings);
+            this.plugin.handle.renderHighlight();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // 手动添加原生颜色选择器到控制区
+    colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = this.plugin.settings.blockHoverHighlightColor || '#808080';
+    colorInput.disabled = this.plugin.settings.blockHoverHighlightColor === '';
+    colorInput.style.marginLeft = '8px';
+    colorInput.addEventListener('change', async () => {
+      this.plugin.settings.blockHoverHighlightColor = colorInput!.value;
+      applyHoverHighlightCssVars(this.plugin.settings);
+      this.plugin.handle.renderHighlight();
+      await this.plugin.saveSettings();
+    });
+    colorSetting.controlEl.appendChild(colorInput);
+
+    // 高亮透明度：0~1，步长 0.05
+    new Setting(containerEl)
+      .setName('高亮透明度')
+      .setDesc('悬停高亮背景的透明度，0 为完全透明，1 为完全不透明')
+      .addSlider((s) =>
+        s
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.blockHoverHighlightOpacity)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.blockHoverHighlightOpacity = value;
+            applyHoverHighlightCssVars(this.plugin.settings);
+            this.plugin.handle.renderHighlight();
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

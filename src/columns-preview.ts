@@ -8,7 +8,7 @@ import type BlockEditorPlugin from './main';
 import { buildColumnsMarkdown } from './convert';
 import { deriveDarkColor, parseColBgMeta, setColBgVars } from './col-bg';
 import type { ColBg } from './col-bg';
-import { getCM, keepViewport } from './util';
+import { getCM, keepViewport, colValignToCss } from './util';
 import { safeDecoCompute } from './cm6-deco-guard';
 
 const DEBUG = false;
@@ -958,15 +958,20 @@ class ColumnsWidget extends WidgetType {
   private editAbort: AbortController | null = null;
   private textareas: HTMLTextAreaElement[] = [];
   private colEls: HTMLElement[] = [];
+  /** 进入编辑态前栏的渲染高度：让 textarea 初始高度与渲染态一致，消除切换跳变 */
+  private preEditHeight = 0;
   private root: HTMLElement | null = null;
   private parentView: EditorView | null = null;
   private focusCol = -1;
   private menuEl: HTMLElement | null = null;
   private colorPickerEl: HTMLElement | null = null;
 
-  /** 内容签名：内容/宽度/背景色/行结构/外观参数变化时装饰层会重建 widget */
+  /** 内容签名：内容/宽度/背景色/行结构/外观参数变化时装饰层会重建 widget。
+   *  额外纳入设置默认 columnsValign：用户在设置里切换对齐方式时，若仅用
+   *  外壳参数 key 判断会命中缓存、复用旧 DOM，导致内联 alignSelf 不更新。 */
   get key(): string {
-    return columnsContentKey(this.texts, this.widths, this.bgs, this.rows, this.opts);
+    return columnsContentKey(this.texts, this.widths, this.bgs, this.rows, this.opts)
+      + '#' + this.ctx.settings.columnsValign;
   }
 
   /** CM 更新期间禁止 dispatch：事件触发的写回统一延迟到微任务执行 */
@@ -1026,10 +1031,15 @@ class ColumnsWidget extends WidgetType {
     return Math.max(48, rows * (64 + maxLines * 24));
   }
 
-  /** 单栏估算高度（与 estimatedHeight 每栏分量一致，同步占位防 0 高实测） */
-  private colEstimatedHeight(): number {
-    const rows = this.rows.length ? this.rows.length : 1;
-    return Math.max(28, Math.round(this.estimatedHeight / rows));
+  /** 单栏内容估算高度：按该栏自身文本行数估算。
+   *  此前用整组估算（最高栏行数）给每栏内容设 min-height，短栏被占位
+   *  高度撑到与最高栏齐平，min-height 优先级高于 align-self，导致
+   *  顶部/居中/底部对齐下短栏无法收缩到内容高。 */
+  private colContentEstimatedHeight(i: number): number {
+    const t = this.texts[i] ?? '';
+    let lines = 1;
+    for (let k = 0; k < t.length; k++) if (t.charCodeAt(k) === 10) lines++;
+    return Math.max(28, lines * 24);
   }
 
   ignoreEvent(): boolean {
@@ -1134,7 +1144,7 @@ class ColumnsWidget extends WidgetType {
       // H1 外观参数 → CSS 变量（styles.css 的 var() 消费，子栏继承；
       // 未设置的项回退 body 上的设置默认值变量）；border 给整行子栏加描边 class
       if (this.opts.gap != null) wrap.style.setProperty('--be-col-gap', this.opts.gap + 'px');
-      if (this.opts.valign) wrap.style.setProperty('--be-col-valign', this.opts.valign);
+      if (this.opts.valign) wrap.style.setProperty('--be-col-valign', colValignToCss(this.opts.valign));
       if (this.opts.radius != null) wrap.style.setProperty('--be-col-radius', this.opts.radius + 'px');
       if (this.opts.border) row.classList.add('block-editor-columns-border');
 
@@ -1156,6 +1166,11 @@ class ColumnsWidget extends WidgetType {
         // 无宽度元数据时按栏数均分（否则拼出 'undefined 1 0%' 被浏览器丢弃，栏宽退化为内容宽）
         const colWidth = this.widths[i] ?? 100 / this.texts.length;
         col.style.flex = colWidth + ' 1 0%';
+        // 栏的交叉轴对齐直接写内联 align-self，绕开 CSS 变量继承可能失效的问题：
+        // 外壳 valign= 参数优先，否则取设置默认值。
+        // stretch → 栏撑满行高（等高）；flex-start/center/flex-end → 栏高=内容高，按上/中/下对齐。
+        const v = this.opts.valign ?? this.ctx.settings.columnsValign;
+        col.style.alignSelf = colValignToCss(v);
         // 每栏背景色：双色模型 → 内联 --col-bg-light/--col-bg-dark（无背景则移除变量，CSS 兜底透明）
         setColBgVars(col, this.bgs[i]);
 
@@ -1260,6 +1275,12 @@ class ColumnsWidget extends WidgetType {
           });
           col.appendChild(ta);
           this.textareas.push(ta);
+          // 用渲染态高度初始化 textarea，消除进入编辑态时的高度跳变：
+          // 渲染态内容高约 28px（1 行），textarea CSS min-height 90px，直接替换会跳 ~62px。
+          if (this.preEditHeight > 0) {
+            ta.style.height = this.preEditHeight + 'px';
+            ta.style.minHeight = this.preEditHeight + 'px';
+          }
         } else {
           // 渲染态：MarkdownRenderer 快照，单击文本进入该栏编辑（光标落至点击处附近）
           const content = document.createElement('div');
@@ -1279,12 +1300,14 @@ class ColumnsWidget extends WidgetType {
             this.enterEdit(i, pos);
           });
           col.appendChild(content);
-          // 同步占位高度：与 estimatedHeight 每栏分量对齐。MarkdownRenderer 是
+          // 同步占位高度：按该栏自身行数估算。MarkdownRenderer 是
           // 异步渲染，填充前 content 若为 0/28px 矮高度，CM6 首次实测会记录矮
           // 高度 → viewport 行高映射错位 → 点击/滚动时 posAtCoords 算出越界
           // pos → lineInner 崩（undefined.length）。min-height 撑起与估算一致的
           // 高度，让首次实测即接近最终值。
-          content.style.minHeight = this.colEstimatedHeight() + 'px';
+          // 注意必须按栏估算：若用整组最高栏估算，min-height 会压过 align-self，
+          // 顶部/居中/底部对齐下短栏被撑高。
+          content.style.minHeight = this.colContentEstimatedHeight(i) + 'px';
           // 空栏：不渲染空内容，加占位类（CSS 提供 min-height 可点区域 + "点击编辑此栏"提示）
           if (!this.texts[i] || !this.texts[i].trim()) {
             content.classList.add('block-editor-col-empty');
@@ -1336,6 +1359,8 @@ class ColumnsWidget extends WidgetType {
     if (this.editCol !== null) return;
     // 进入编辑态前确保格式命令桥接已安装（有活动编辑器时才可取得原型）
     installColumnsFormatBridge(this.ctx.app);
+    // 捕获当前栏渲染高度，textarea 初始高度以此为准，消除切换跳变
+    this.preEditHeight = this.colEls[i]?.offsetHeight ?? 0;
     this.editCol = i;
     this.pendingCaret = caretPos;
     editingWidgets.add(this);
@@ -2022,7 +2047,10 @@ function buildDecorations(state: DecorState, regions: ColumnsRegion[]): Decorati
       continue;
     }
     used.add(r.startPos);
-    const key = columnsContentKey(r.segments, r.widths, r.bgs, r.rows, r.opts);
+    // 缓存键纳入设置默认 columnsValign，与 WidgetType.key 保持一致：
+    // 设置切换对齐方式时强制重建 widget，使内联 alignSelf 及时更新。
+    const key = columnsContentKey(r.segments, r.widths, r.bgs, r.rows, r.opts)
+      + '#' + sharedCtx!.settings.columnsValign;
     let entry = widgetCache.get(r.startPos);
     let widget: ColumnsWidget;
     if (entry && entry.path === docId && entry.owner === owner && entry.key === key) {

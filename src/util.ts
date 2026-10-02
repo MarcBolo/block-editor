@@ -12,6 +12,16 @@ export function getIndent(line: string): string {
   return m ? m[1] : '';
 }
 
+/** 分栏垂直对齐语义值 → CSS align-items 合法值。
+ *  align-items 不接受 top / bottom（非法值会被浏览器忽略并回退 stretch，
+ *  表现为顶部 / 底部对齐不生效），须映射为 flex-start / flex-end；
+ *  center / stretch 本就是合法值，原样返回。 */
+export function colValignToCss(v: string): string {
+  if (v === 'top') return 'flex-start';
+  if (v === 'bottom') return 'flex-end';
+  return v;
+}
+
 export function getLines(editor: Editor, start: number, end: number): string[] {
   const lines: string[] = [];
   for (let i = start; i <= end; i++) lines.push(editor.getLine(i));

@@ -1,6 +1,6 @@
 {
   "name": "block-editor",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Notion 风格块编辑：块手柄、拖拽排序、多选、类型转换与斜杠命令",
   "main": "main.js",
   "scripts": {

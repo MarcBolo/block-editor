@@ -17,9 +17,10 @@ export class SelectionManager {
   constructor(private ctx: BlockEditorPlugin) {}
 
   init(): void {
+    // 选区层不在 init 时挂入 DOM，renderSelection 时动态挂到当前编辑器的
+    // .cm-editor 上：absolute 定位 + overflow:hidden 物理裁剪，不会溢出到标签页栏。
     const layer = document.createElement('div');
     layer.className = 'block-editor-selection-layer';
-    document.body.appendChild(layer);
     this.layerEl = layer;
   }
 
@@ -79,9 +80,14 @@ export class SelectionManager {
     const cm = getCM(sel.editor);
     if (!cm) return;
 
-    const doc = cm.state.doc;
-    const cmRect = cm.dom.getBoundingClientRect();
+    // 挂到当前编辑器 .cm-editor，absolute 定位 + overflow:hidden 物理裁剪
+    const editorDom = cm.dom;
+    const editorRect = editorDom.getBoundingClientRect();
+    if (layer.parentElement !== editorDom) editorDom.appendChild(layer);
+    layer.style.position = 'absolute';
+    layer.style.inset = '0';
 
+    const doc = cm.state.doc;
     for (const r of sel.ranges) {
       // 选区可能因文档变化过期，越界直接跳过（doc.line 越界会抛错）
       if (r.start >= doc.lines || r.end >= doc.lines) continue;
@@ -90,12 +96,17 @@ export class SelectionManager {
       const to = cm.coordsAtPos(below.to);
       if (!from || !to) continue;
 
+      const top = Math.max(from.top - editorRect.top, 0);
+      const bottom = Math.min(to.bottom - editorRect.top, editorRect.height);
+      if (bottom - top < 4) continue;
+
       const box = document.createElement('div');
       box.className = 'block-editor-selection';
-      box.style.top = from.top + 'px';
-      box.style.height = Math.max(to.bottom - from.top, 4) + 'px';
-      box.style.left = cmRect.left + 'px';
-      box.style.width = cmRect.width + 'px';
+      box.style.position = 'absolute';
+      box.style.top = top + 'px';
+      box.style.height = bottom - top + 'px';
+      box.style.left = '0';
+      box.style.width = editorRect.width + 'px';
       layer.appendChild(box);
     }
   }

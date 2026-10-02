@@ -15,10 +15,12 @@ export class HandleController {
   constructor(private ctx: BlockEditorPlugin) {}
 
   init(): void {
+    // 高亮 / 手柄不在 init 时挂入 DOM，而是在 showHighlight / showHandle 时
+    // 动态挂到当前编辑器的 .cm-editor 上：.cm-editor 有 overflow:hidden，
+    // absolute 定位的高亮会被物理裁剪在编辑器可视区内，永远不会溢出到标签页栏。
     const highlight = document.createElement('div');
     highlight.className = 'block-editor-hover-block';
     highlight.style.display = 'none';
-    document.body.appendChild(highlight);
     this.highlightEl = highlight;
 
     const handle = document.createElement('div');
@@ -46,7 +48,6 @@ export class HandleController {
 
     handle.appendChild(svg);
     handle.style.display = 'none';
-    document.body.appendChild(handle);
     this.handleEl = handle;
 
     this.ctx.registerDomEvent(handle, 'mousedown', (e) => this.ctx.drag.onHandleMouseDown(e));
@@ -136,15 +137,22 @@ export class HandleController {
       return;
     }
 
+    // 挂到当前编辑器 .cm-editor：absolute 定位 + overflow:hidden 物理裁剪，
+    // 手柄 / 高亮永远不会溢出到标签页栏
+    const editorDom = cm.dom;
+    const editorRect = editorDom.getBoundingClientRect();
+
     const lineH = coords.bottom - coords.top || 20;
     // M4：手柄尺寸取设置值（缺省回退常量 20），与 styles.css 的 --be-handle-size 保持一致
     const handleSize = this.ctx.settings.handleSize || HANDLE_W;
-    const top = coords.top + (lineH - handleSize) / 2;
+    const top = coords.top - editorRect.top + (lineH - handleSize) / 2;
 
     if (this.handleEl) {
+      if (this.handleEl.parentElement !== editorDom) editorDom.appendChild(this.handleEl);
+      this.handleEl.style.position = 'absolute';
       this.handleEl.style.display = 'flex';
       this.handleEl.style.top = top + 'px';
-      this.handleEl.style.left = coords.left - handleSize - 6 + 'px';
+      this.handleEl.style.left = coords.left - editorRect.left - handleSize - 6 + 'px';
     }
     this.showHighlight(editor, block);
   }
@@ -172,6 +180,11 @@ export class HandleController {
 
   // 手柄对应块的浅色高亮，给「即将操作哪一块」以视觉反馈
   private showHighlight(editor: Editor, block: BlockRange): void {
+    // 设置关闭时不显示高亮（并抹掉可能已显示的那层）
+    if (!this.ctx.settings.blockHoverHighlight) {
+      this.hideHighlight();
+      return;
+    }
     const el = this.highlightEl;
     if (!el) return;
     const cm = getCM(editor);
@@ -188,14 +201,27 @@ export class HandleController {
       this.hideHighlight();
       return;
     }
-    // 以 Obsidian 行宽（编辑器内容区宽度）为准：
-    // 左缘 = 首行文本起点，右缘 = 内容区右缘；稳定覆盖块内所有行，
-    // 不依赖 coordsAtPos 逐行取终点（视口外行会取不到导致宽度偏窄）
+    // 挂到当前编辑器 .cm-editor，用 absolute 定位 + overflow:hidden 物理裁剪：
+    // 高亮永远不会溢出编辑器可视区，从根本上杜绝覆盖标签页栏。
+    // 坐标从视口系转换为编辑器系（减去 editorRect 的 top/left）。
+    const editorDom = cm.dom;
+    const editorRect = editorDom.getBoundingClientRect();
+    // 宽度基准取内容区（.cm-content，即行宽）而非整个 .cm-editor：
+    // .cm-editor 含左右侧留白，用它的右缘会使高亮右侧超出行宽。
     const contentRect = cm.contentDOM.getBoundingClientRect();
+    if (el.parentElement !== editorDom) editorDom.appendChild(el);
+
+    const top = Math.max(from.top - editorRect.top, 0);
+    const bottom = Math.min(to.bottom - editorRect.top, editorRect.height);
+    if (bottom - top < 4) {
+      this.hideHighlight();
+      return;
+    }
+    el.style.position = 'absolute';
     el.style.display = 'block';
-    el.style.top = from.top + 'px';
-    el.style.height = Math.max(to.bottom - from.top, 4) + 'px';
-    el.style.left = from.left + 'px';
+    el.style.top = top + 'px';
+    el.style.height = bottom - top + 'px';
+    el.style.left = from.left - editorRect.left + 'px';
     el.style.width = Math.max(contentRect.right - from.left, 8) + 'px';
   }
 

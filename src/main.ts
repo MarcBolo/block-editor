@@ -1,4 +1,5 @@
 import { Plugin } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 import { BlockDetector } from './block-detect';
 import { SelectionManager } from './selection';
 import { BlockConverter } from './convert';
@@ -14,13 +15,84 @@ import {
   installColumnsFormatBridge,
   uninstallColumnsFormatBridge,
 } from './columns-preview';
-import { blockColorExtension, applyBlockColorToDom } from './block-color';
+import {
+  blockColorExtension,
+  applyBlockColorToDom,
+  applyBlockColorFromSource,
+  hasBlockColorMarker,
+  firstBlockColor,
+  setBlockColorVars,
+  SOURCE_BLOCK_SELECTOR,
+} from './block-color';
 import { parseColBgMeta, setColBgVars } from './col-bg';
+import { colValignToCss } from './util';
 import { registerCommands } from './commands';
 import { invalidateNotesWithBlocks } from './picker';
 import { installLinkOpenBridge, uninstallLinkOpenBridge } from './link-open';
-import { BlockEditorSettingTab, DEFAULT_SETTINGS, applyColumnsCssVars } from './settings';
+import { BlockEditorSettingTab, DEFAULT_SETTINGS, applyColumnsCssVars, applyHoverHighlightCssVars } from './settings';
 import type { BlockEditorSettings } from './settings';
+
+/**
+ * 取「当前元素自身」的源文本：ctx.getSectionInfo 的 text 常是整段/整篇文本，
+ * 而 lineStart/lineEnd 才是该元素的源码行范围（闭区间）。只截取这段可避免把
+ * 别处的标记算到本元素头上（否则每个标题/段落都会被误判为「含标记却未上色」）。
+ * 行范围越界或不可用时退回整段文本。
+ */
+function ownSourceText(
+  source: string,
+  info: { lineStart: number; lineEnd: number } | null
+): string {
+  if (!source || !info) return source;
+  const lines = source.split('\n');
+  if (info.lineStart < 0 || info.lineEnd < info.lineStart || info.lineEnd >= lines.length) {
+    return source;
+  }
+  return lines.slice(info.lineStart, info.lineEnd + 1).join('\n');
+}
+
+/** 读取整篇文件文本（源文本兜底用；鸭子类型判断 TFile，避免测试桩缺类时抛错） */
+async function readVaultText(app: App, path: string): Promise<string> {
+  const file = app.vault.getAbstractFileByPath(path);
+  if (!file || typeof (file as { extension?: unknown }).extension !== 'string') return '';
+  try {
+    return await app.vault.cachedRead(file as TFile);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 阅读模式源文本兜底：从段落源文本按出现顺序抽取 callout 的 `[!type|meta]`，
+ * 回填到渲染 DOM 上缺失的 `data-callout-metadata`。仅当源文本与 DOM 的
+ * callout 数量、类型逐项一致时才回填（否则可能错位上色，宁可不填）。
+ * 已有属性的 callout 不动，兼容 Obsidian 自行解析 metadata 的常规路径。
+ */
+function backfillCalloutMetaFromSource(el: HTMLElement, source: string): void {
+  if (!source) return;
+  const srcList: { kind: string; meta: string }[] = [];
+  const re = /^\s*>+\s*\[!([^\]\n]+)\]/;
+  for (const line of source.split('\n')) {
+    const m = re.exec(line);
+    if (!m) continue;
+    let kind = m[1];
+    let meta = '';
+    const bar = kind.indexOf('|');
+    if (bar !== -1) {
+      meta = kind.slice(bar + 1).trim();
+      kind = kind.slice(0, bar);
+    }
+    srcList.push({ kind: kind.trim().toLowerCase(), meta });
+  }
+  if (srcList.length === 0) return;
+  const domList = Array.from(el.querySelectorAll<HTMLElement>('.callout[data-callout]'));
+  if (domList.length !== srcList.length) return;
+  domList.forEach((callout, i) => {
+    const src = srcList[i];
+    if (!src || callout.getAttribute('data-callout') !== src.kind) return;
+    if (!src.meta || callout.getAttribute('data-callout-metadata')) return;
+    callout.setAttribute('data-callout-metadata', src.meta);
+  });
+}
 
 export default class BlockEditorPlugin extends Plugin {
   settings: BlockEditorSettings = { ...DEFAULT_SETTINGS };
@@ -40,6 +112,8 @@ export default class BlockEditorPlugin extends Plugin {
     document.body.classList.toggle('be-columns-live-on', this.settings.livePreviewWidget);
     // M4：设置默认外观 / 手柄尺寸落到 body CSS 变量（阅读模式原生渲染同样消费）
     applyColumnsCssVars(this.settings);
+    // 块悬停高亮颜色 / 透明度落到 body CSS 变量
+    applyHoverHighlightCssVars(this.settings);
 
     // 链接打开位置：闭包读取设置 ⇒ 改设置即时生效，无需重装桥接
     installLinkOpenBridge(this.app, () => this.settings.linkOpenMode);
@@ -59,17 +133,47 @@ export default class BlockEditorPlugin extends Plugin {
     //   外观参数写成 CSS 变量（子栏继承，与 styles.css 的 var() 消费对接），
     //   border 给子栏加 class；宽度支持多行分组 `60-40/50-50`，数量与直接子栏
     //   一致时按权重式 flex 设置（与实时预览 ColumnsWidget 一致）。
-    this.registerMarkdownPostProcessor((el) => {
-      // H5 任意块颜色标记回放：独立于分栏 widget 开关（%% block-color:<color> %%）
-      applyBlockColorToDom(el);
+    // 阅读模式回放主体：同一元素可能被「同步（getSectionInfo 源文本）」与
+    // 「异步（退回整篇文件内容）」各跑一次，故抽成局部函数复用。
+    const applyReadingMode = (
+      el: HTMLElement,
+      source: string
+    ): { blockColor: number; colBg: number } => {
+      // H5 任意块颜色标记回放：独立于分栏 widget 开关（%% block-color:<color> %%）。
+      // 有 DOM 载体（标记未被 Obsidian 清洗）时走精确的 DOM 回放；否则以
+      // ctx.getSectionInfo 拿到的段落源文本为准回放（方案 1）。
+      let blockColor = 0;
+      const carriers = el.querySelectorAll('[data-block-color]').length;
+      if (carriers > 0) {
+        applyBlockColorToDom(el);
+        blockColor = carriers;
+      } else if (source) {
+        blockColor = applyBlockColorFromSource(el, source);
+        // 兜底：传入的 source 就是本元素的源码行范围，标记落在其中即属于本元素；
+        // 锚点匹配因内联格式差异等失败时，直接把颜色落到元素本身
+        if (blockColor === 0 && el.matches(SOURCE_BLOCK_SELECTOR)) {
+          const bg = firstBlockColor(source);
+          if (bg?.light) {
+            setBlockColorVars(el, bg);
+            el.setAttribute('data-block-color', bg.light);
+            blockColor = 1;
+          }
+        }
+      }
       // 开关关闭时阅读模式不叠加自定义回放（栏宽 / 背景色 / 外观参数），
       // 与实时预览 widget 的开关行为保持一致：关闭 = 原生 callout 展示
-      if (!this.settings.livePreviewWidget) return;
+      if (!this.settings.livePreviewWidget) return { blockColor, colBg: 0 };
+      // 分栏元数据兜底：若 Obsidian 未把 `|bg=...` 落到 data-callout-metadata，
+      // 用源文本按序回填，后续回放逻辑无需改动
+      backfillCalloutMetaFromSource(el, source);
+      let colBg = 0;
       el.querySelectorAll('.callout[data-callout="col"]').forEach((callout) => {
         const meta = callout.getAttribute('data-callout-metadata') ?? '';
         // 双色背景：解析 bg / bg-dark → 写 --col-bg-light/--col-bg-dark 变量，
         // 由 styles.css 主题作用域消费（body.theme-dark 下取 dark）
-        setColBgVars(callout as HTMLElement, parseColBgMeta(meta));
+        const bg = parseColBgMeta(meta);
+        if (bg) colBg++;
+        setColBgVars(callout as HTMLElement, bg);
       });
 
       el.querySelectorAll('.callout[data-callout="multi-column"]').forEach((shell) => {
@@ -79,7 +183,7 @@ export default class BlockEditorPlugin extends Plugin {
         const gapM = meta.match(/(?:^|\s)gap=(\d+)(?:\s|$)/);
         if (gapM) shellEl.style.setProperty('--be-col-gap', gapM[1] + 'px');
         const valignM = meta.match(/(?:^|\s)valign=(top|center|bottom|stretch)(?:\s|$)/);
-        if (valignM) shellEl.style.setProperty('--be-col-valign', valignM[1]);
+        if (valignM) shellEl.style.setProperty('--be-col-valign', colValignToCss(valignM[1]));
         const radiusM = meta.match(/(?:^|\s)radius=(\d+)(?:\s|$)/);
         if (radiusM) shellEl.style.setProperty('--be-col-radius', radiusM[1] + 'px');
         const hasBorder = /(?:^|\s)border(?:\s|$)/.test(meta);
@@ -101,11 +205,20 @@ export default class BlockEditorPlugin extends Plugin {
             cur = [];
             continue;
           }
-          const cmCol = !isCol && child.classList.contains('cm-callout')
-            ? child.querySelector(':scope > .callout[data-callout="col"]')
-            : null;
-          if (cmCol) {
-            cur.push(cmCol as HTMLElement);
+          // 栏单元 = .callout-content 的直接子元素（与 styles.css 的 flex/min-width
+          // 规则层级一致）：
+          // - 直连结构 `.callout-content > .callout[col]`：栏单元即该 .callout；
+          // - 包装结构 `.callout-content > .cm-callout > .callout[col]`：真正参与
+          //   flex 布局、被 CSS 设了 flex/min-width 的是外层 .cm-callout，故必须推
+          //   外层。此前推内层 .callout，导致外层被 CSS 强制 `flex:1 1 0` 均分、
+          //   内联栏宽权重失效；同时 align-items 只作用于外层，内层仍 stretch →
+          //   栏宽与对齐在同结构下失效，表现为「同视图内有的生效、有的不生效」。
+          const isCmCol =
+            !isCol &&
+            child.classList.contains('cm-callout') &&
+            !!child.querySelector(':scope > .callout[data-callout="col"]');
+          if (isCmCol) {
+            cur.push(child as HTMLElement);
             continue;
           }
           const cmRow = !isCol && child.classList.contains('cm-callout')
@@ -139,15 +252,61 @@ export default class BlockEditorPlugin extends Plugin {
             const w = groups[ri];
             if (!w || w.length !== row.length) return;
             row.forEach((col, ci) => {
-              col.style.flex = `${w[ci]} 1 0`;
+              col.style.flex = `${w[ci]} 1 0%`;
             });
           });
         } else {
           cols.forEach((col, i) => {
-            col.style.flex = `${flat[i]} 1 0`;
+            col.style.flex = `${flat[i]} 1 0%`;
           });
         }
       });
+      return { blockColor, colBg };
+    };
+
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      // 首次渲染时 ctx.getSectionInfo / 渲染 DOM 可能尚未就绪（表现为：编辑一下
+      // 触发重渲染后颜色才出现），因此同步跑一次后按需延迟重试若干次。
+      const attempt = (n: number): void => {
+        let info: { text: string; lineStart: number; lineEnd: number } | null = null;
+        try {
+          info = typeof ctx.getSectionInfo === 'function' ? ctx.getSectionInfo(el) : null;
+        } catch {
+          info = null;
+        }
+        const source = info?.text ?? '';
+        // 关键：text 常是整段/整篇文本，lineStart/lineEnd 才是本元素的源码行范围。
+        // 只取本元素自己的行，否则每个标题/段落都会把别处标记算进来。
+        const own = ownSourceText(source, info);
+        const ownHasMarkers = hasBlockColorMarker(own);
+        const hasColMarkup = !!el.querySelector(
+          '.callout[data-callout="col"], .callout[data-callout="multi-column"]'
+        );
+        let r = { blockColor: 0, colBg: 0 };
+        try {
+          r = applyReadingMode(el, own);
+        } catch {
+          // 单个元素回放异常不拖垮整篇渲染
+        }
+        // 段落信息拿不到（getSectionInfo 为 null / 抛错）时，退回整篇文件内容再跑一次
+        if (!source && ctx.sourcePath && n === 0) {
+          void readVaultText(this.app, ctx.sourcePath).then((text) => {
+            if (!text) return;
+            try {
+              applyReadingMode(el, text);
+            } catch {
+              // 兜底回放异常同样不拖垮整篇渲染
+            }
+          });
+        }
+        // 本元素确有插件标记但一次都没上色，或段落信息为空 → 延迟重试，等 DOM / 段落信息就绪
+        const shouldRetry =
+          n < 3 &&
+          el.isConnected &&
+          (source === '' || (ownHasMarkers && r.blockColor === 0) || (hasColMarkup && r.colBg === 0));
+        if (shouldRetry) window.setTimeout(() => attempt(n + 1), n === 0 ? 0 : 80);
+      };
+      attempt(0);
     });
 
     // 鼠标移动：拖拽优先，其次决定是否显示手柄
@@ -267,6 +426,7 @@ export {
   blockColorField,
   blockColorExtension,
   applyBlockColorToDom,
+  applyBlockColorFromSource,
   getBlockColorDiagnostics,
   BLOCK_COLOR_RE,
   BLOCK_COLOR_SPAN_RE,

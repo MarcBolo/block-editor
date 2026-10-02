@@ -65,23 +65,23 @@ export class DragController {
   constructor(private ctx: BlockEditorPlugin) {}
 
   init(): void {
+    // 指示器 / 贴边线 / 描边盒不在 init 时挂入 DOM，使用时动态挂到目标编辑器的
+    // .cm-editor 上：absolute 定位 + overflow:hidden 物理裁剪，不溢出到标签页栏。
+    // 拖拽幽灵（ghost）仍挂 body，需高于一切 UI 跟随鼠标。
     const indicator = document.createElement('div');
     indicator.className = 'block-editor-indicator';
     indicator.style.display = 'none';
-    document.body.appendChild(indicator);
     this.indicatorEl = indicator;
     // H4 贴边分栏竖线（横向插入线之上，视觉区分：竖线 = 贴边合成）
     const edgeLine = document.createElement('div');
     edgeLine.className = 'block-editor-edge-line';
     edgeLine.style.display = 'none';
-    document.body.appendChild(edgeLine);
     this.edgeLineEl = edgeLine;
     // 贴边分栏目标块整体描边（与竖线共同构成「此块将合成分栏」的明确视觉，
     // 与「横向插入线 = 移动」形成一眼可辨的区分，避免两种落点模式混淆）
     const edgeBox = document.createElement('div');
     edgeBox.className = 'block-editor-edge-box';
     edgeBox.style.display = 'none';
-    document.body.appendChild(edgeBox);
     this.edgeBoxEl = edgeBox;
   }
 
@@ -370,7 +370,7 @@ export class DragController {
           ds.nestCol = null;
           ds.quotePrefix = null;
           ds.targetEditor = null;
-          this.showEdgeLine(side, box);
+          this.showEdgeLine(side, box, cm);
           return;
         }
       }
@@ -445,14 +445,19 @@ export class DragController {
     // 插入线宽度取编辑器「系统行宽」：以内容区（.cm-content，即 Obsidian 可读行宽
     // 约束后的文本列）为基准整列铺满，不再随目标行/当前块文本长短变化
     // （否则同一块内各行长短不一，落点指示忽长忽短）。
+    // 挂到目标编辑器 .cm-editor，absolute 定位 + overflow:hidden 物理裁剪。
+    const editorDom = cm.dom;
+    const editorRect = editorDom.getBoundingClientRect();
     const contentRect = cm.contentDOM.getBoundingClientRect();
-    const left = contentRect.left;
+    const left = contentRect.left - editorRect.left;
     const width = Math.max(contentRect.width, 40);
 
     const yPos = insertAt > lineIndex ? lineCoords.bottom : lineCoords.top;
     if (this.indicatorEl) {
+      if (this.indicatorEl.parentElement !== editorDom) editorDom.appendChild(this.indicatorEl);
+      this.indicatorEl.style.position = 'absolute';
       this.indicatorEl.style.display = 'block';
-      this.indicatorEl.style.top = yPos + 'px';
+      this.indicatorEl.style.top = yPos - editorRect.top + 'px';
       this.indicatorEl.style.left = left + 'px';
       this.indicatorEl.style.width = width + 'px';
     }
@@ -559,33 +564,48 @@ export class DragController {
     const topC = cm.coordsAtPos(doc.line(block.start + 1).from);
     const botC = cm.coordsAtPos(doc.line(block.end + 1).to);
     if (!topC || !botC) return null;
+    // 钳制到编辑器内容区可视范围：块首行贴近顶部时 coordsAtPos 的 top
+    // 可能小于内容区上缘，导致贴边分栏描边 / 竖线向上溢出覆盖标签页。
+    const contentRect = cm.contentDOM.getBoundingClientRect();
     return {
-      top: topC.top,
-      bottom: botC.bottom,
+      top: Math.max(topC.top, contentRect.top),
+      bottom: Math.min(botC.bottom, contentRect.bottom),
       left: topC.left,
-      right: cm.contentDOM.getBoundingClientRect().right,
+      right: contentRect.right,
     };
   }
 
   /** 绘制贴边分栏视觉：目标块整体描边 + 侧边竖线（side=-1 贴左，1 贴右） */
   private showEdgeLine(
     side: -1 | 1,
-    box: { top: number; bottom: number; left: number; right: number }
+    box: { top: number; bottom: number; left: number; right: number },
+    cm: CMView
   ): void {
     if (this.indicatorEl) this.indicatorEl.style.display = 'none';
-    const h = Math.max(2, box.bottom - box.top);
+    // 挂到目标编辑器 .cm-editor，视口坐标转编辑器坐标，overflow:hidden 物理裁剪
+    const editorDom = cm.dom;
+    const editorRect = editorDom.getBoundingClientRect();
+    const top = box.top - editorRect.top;
+    const bottom = box.bottom - editorRect.top;
+    const left = box.left - editorRect.left;
+    const right = box.right - editorRect.left;
+    const h = Math.max(2, bottom - top);
     if (this.edgeLineEl) {
-      const x = side === -1 ? box.left : box.right;
+      if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
+      const x = side === -1 ? left : right;
+      this.edgeLineEl.style.position = 'absolute';
       this.edgeLineEl.style.display = 'block';
       this.edgeLineEl.style.left = x + 'px';
-      this.edgeLineEl.style.top = box.top + 'px';
+      this.edgeLineEl.style.top = top + 'px';
       this.edgeLineEl.style.height = h + 'px';
     }
     if (this.edgeBoxEl) {
+      if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
+      this.edgeBoxEl.style.position = 'absolute';
       this.edgeBoxEl.style.display = 'block';
-      this.edgeBoxEl.style.left = box.left + 'px';
-      this.edgeBoxEl.style.top = box.top + 'px';
-      this.edgeBoxEl.style.width = Math.max(box.right - box.left, 8) + 'px';
+      this.edgeBoxEl.style.left = left + 'px';
+      this.edgeBoxEl.style.top = top + 'px';
+      this.edgeBoxEl.style.width = Math.max(right - left, 8) + 'px';
       this.edgeBoxEl.style.height = h + 'px';
     }
   }
