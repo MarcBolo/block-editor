@@ -1,9 +1,11 @@
 # Block Editor
 
-[English](README.en.md) | 简体中文
+[English](图片/README.en.md) | 简体中文
 
 Notion 风格的 Obsidian 块编辑插件：块手柄、拖拽排序、多选、块类型转换、分栏与块颜色。仅桌面端。
 
+![alt text](l.png)
+![alt text](a.png) 
 ## 功能
 
 - **块手柄**：鼠标悬停或光标所在块的左侧显示六点拖拽手柄（Notion 样式），对应块浅色高亮
