@@ -1827,8 +1827,6 @@ class ColumnsWidget extends WidgetType {
         removeOutLineEl();
         const el = createEl('div');
         el.className = 'block-editor-indicator block-editor-col-outline';
-        el.style.display = 'block';
-        el.style.position = 'absolute';
         el.style.left = `${contentRect.left - editorRect.left}px`;
         el.style.width = `${Math.max(contentRect.width, 40)}px`;
         el.style.top = `${(c.bottom ?? c.top) - editorRect.top - 1}px`;
@@ -1842,12 +1840,10 @@ class ColumnsWidget extends WidgetType {
       // 只移除上一条线的 DOM：不能用 clearOutLine()，否则会把刚算出的 outLine 清成 null
       removeOutLineEl();
       const el = createEl('div');
-      // 必须同时挂 col-outline 并显式 display:block —— .block-editor-indicator 的
-      // 默认样式是 display:none（供 drag.ts 用 setCssStyles 显隐），只复制这个类名
-      // 会得到一条**永远不可见**的线，用户看不到任何落点反馈，表现为「拖不出来」。
+      // 显隐由 .block-editor-col-outline 自己负责（display:block，见 styles.css），
+      // 外观基类 .block-editor-indicator 不含 display —— 两条落点线共用外观但
+      // 显隐各自独立，改基类不会波及这里。这里只写随指针变化的动态几何。
       el.className = 'block-editor-indicator block-editor-col-outline';
-      el.style.display = 'block';
-      el.style.position = 'absolute';
       el.style.left = `${contentRect.left - editorRect.left}px`;
       el.style.width = `${Math.max(contentRect.width, 40)}px`;
       el.style.top = `${c.top - editorRect.top - 1}px`;

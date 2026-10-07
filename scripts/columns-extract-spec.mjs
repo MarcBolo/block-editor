@@ -188,20 +188,33 @@ console.log('\n=== 4. grip 命中区守卫（CSS 不得退化）===');
   ok(/\.block-editor-col-grip:hover/.test(css), 'grip 有悬停反馈');
 }
 
-console.log('\n=== 5. 落点线可见性守卫（回归：曾经隐形）===');
+console.log('\n=== 5. 落点线可见性守卫（回归：曾经隐形 / 曾经耦合）===');
 {
   const css = readFileSync('styles.css', 'utf8');
-  // .block-editor-indicator 默认 display:none（drag.ts 靠 setCssStyles 显隐自己的实例），
-  // 拖出落点线若只复制该类名就会永远看不见 —— 用户完全收不到「此处可放」的反馈。
+  // 【解耦后的核心不变量】外观基类 .block-editor-indicator 不得声明 display。
+  // 它的两个消费者对可见性的需求相反：drag.ts 的插入线是常驻单例、要默认隐藏；
+  // columns-preview 的落点线每次新建、必须一挂上就可见。把 display 写进基类，
+  // 后者就只能靠 `.a.b` 特异性硬盖 —— 改基类时它会静默隐形，表现为「拖不出来」。
   const ind = css.match(/\.block-editor-indicator\s*\{([^}]*)\}/);
-  ok(!!ind && /display:\s*none/.test(ind[1]), '.block-editor-indicator 默认 display:none（前提，勿改）');
-  const outline = css.match(/\.block-editor-indicator\.block-editor-col-outline\s*\{([^}]*)\}/);
-  ok(!!outline, '存在 .block-editor-col-outline 覆盖规则');
-  ok(!!outline && /display:\s*block/.test(outline[1]), 'col-outline 强制 display:block（落点线可见）');
-  // 源码侧：新建元素必须带该类名并显式置 display
+  ok(!!ind, '找到 .block-editor-indicator 外观基类');
+  ok(!!ind && !/display\s*:/.test(ind[1]), '外观基类不含 display（显隐不属于外观，两条线各自独立）');
+  ok(!!ind && /position:\s*absolute/.test(ind[1]), '外观基类声明 position:absolute（定位属外观）');
+  // 两条线各自的显隐规则必须存在且互不覆盖（都是单类选择器，特异性相同）
+  const insertLine = css.match(/\.block-editor-insert-line\s*\{([^}]*)\}/);
+  ok(!!insertLine && /display:\s*none/.test(insertLine[1]), '插入线默认 display:none（可复用单例需默认隐藏）');
+  const outline = css.match(/\.block-editor-col-outline\s*\{([^}]*)\}/);
+  ok(!!outline, '存在 .block-editor-col-outline 规则');
+  ok(!!outline && /display:\s*block/.test(outline[1]), 'col-outline 自身即 display:block（一次性元素，必须一挂上就可见）');
+  ok(!/\.block-editor-indicator\.block-editor-col-outline/.test(css), 'col-outline 不再靠复合选择器压制基类（耦合已消除）');
+  // 显示侧统一走 .is-visible 状态类：grep 这一个类名即可看出「谁在显示」
+  ok(/\.block-editor-insert-line\.is-visible/.test(css), '存在 .is-visible 显示态规则');
+  const dragSrc = readFileSync('src/drag.ts', 'utf8');
+  ok(!/setCssStyles\(\{[^}]*display/.test(dragSrc), 'drag.ts 不再用 setCssStyles 写内联 display（显隐只在 CSS 里可见）');
+  ok(/classList\.toggle\('is-visible'/.test(dragSrc), 'drag.ts 统一用 is-visible 类切换显隐');
+  // 源码侧：新建元素必须带该类名（不再内联置 display）
   const src = readFileSync('src/columns-preview.ts', 'utf8');
   ok(/block-editor-indicator block-editor-col-outline/.test(src), '源码新建落点线带 col-outline 类名');
-  ok(/el\.style\.display = 'block'/.test(src), '源码显式置 display:block');
+  ok(!/el\.style\.display = 'block'/.test(src), '源码不再内联置 display（与 CSS 重复声明）');
   // 源栏拖拽态反馈：没有它时用户无法判断拖拽是否已开始
   ok(/\.block-editor-col-editor\.block-editor-col-dragging/.test(css), '存在源栏拖拽态样式');
   ok(/classList\.toggle\('block-editor-col-dragging'/.test(src), '源码会切换源栏拖拽态');

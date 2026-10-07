@@ -4991,8 +4991,6 @@ var _ColumnsWidget = class _ColumnsWidget extends import_view3.WidgetType {
         removeOutLineEl();
         const el2 = createEl("div");
         el2.className = "block-editor-indicator block-editor-col-outline";
-        el2.style.display = "block";
-        el2.style.position = "absolute";
         el2.style.left = `${contentRect.left - editorRect.left}px`;
         el2.style.width = `${Math.max(contentRect.width, 40)}px`;
         el2.style.top = `${((_a = c2.bottom) != null ? _a : c2.top) - editorRect.top - 1}px`;
@@ -5006,8 +5004,6 @@ var _ColumnsWidget = class _ColumnsWidget extends import_view3.WidgetType {
       removeOutLineEl();
       const el = createEl("div");
       el.className = "block-editor-indicator block-editor-col-outline";
-      el.style.display = "block";
-      el.style.position = "absolute";
       el.style.left = `${contentRect.left - editorRect.left}px`;
       el.style.width = `${Math.max(contentRect.width, 40)}px`;
       el.style.top = `${c.top - editorRect.top - 1}px`;
@@ -5654,7 +5650,7 @@ var DragController = class {
   }
   init() {
     const indicator = createEl("div");
-    indicator.className = "block-editor-indicator";
+    indicator.className = "block-editor-indicator block-editor-insert-line";
     this.indicatorEl = indicator;
     const edgeLine = createEl("div");
     edgeLine.className = "block-editor-edge-line";
@@ -5665,6 +5661,25 @@ var DragController = class {
     const colSlot = createEl("div");
     colSlot.className = "block-editor-col-slot";
     this.colSlotEl = colSlot;
+  }
+  /**
+   * 落点视觉的显隐（唯一入口）。
+   *
+   * 为什么不用 setCssStyles 写内联 display：内联样式优先级高于样式表，
+   * 一旦写进去，styles.css 里的显隐规则就再也观察不到效果 —— 两条线
+   * （drag.ts 的可复用插入线 / columns-preview 的一次性落点线）虽然共用
+   * 外观基类，但显隐必须各自独立、且都在 CSS 里可见。统一走 .is-visible
+   * 状态类后，「谁在显示」这件事只有一处真相：grep 这个类名即可。
+   */
+  setVisual(el, visible) {
+    el == null ? void 0 : el.classList.toggle("is-visible", visible);
+  }
+  /** 隐藏全部落点视觉（插入线 / 贴边线 / 描边盒 / 新栏竖条） */
+  hideAllVisuals() {
+    this.setVisual(this.indicatorEl, false);
+    this.setVisual(this.edgeLineEl, false);
+    this.setVisual(this.edgeBoxEl, false);
+    this.setVisual(this.colSlotEl, false);
   }
   destroy() {
     var _a, _b, _c, _d;
@@ -5732,10 +5747,7 @@ var DragController = class {
     this.removeGhost();
     this.ctx.handle.setDragging(false);
     document.body.classList.remove("block-editor-dragging");
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: "none" });
-    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: "none" });
-    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: "none" });
-    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: "none" });
+    this.hideAllVisuals();
     if (!ds.moved) {
       this.ctx.menu.openTypeMenu(e, {
         editor: ds.editor,
@@ -5966,8 +5978,8 @@ var DragController = class {
     if (ds.edgeSide !== null) {
       ds.edgeSide = null;
       ds.edgeTargetStart = null;
-      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: "none" });
-      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: "none" });
+      this.setVisual(this.edgeLineEl, false);
+      this.setVisual(this.edgeBoxEl, false);
     }
     if (target && isNestTarget(target.type)) {
       const targetText = editor.getLine(target.start);
@@ -6020,7 +6032,7 @@ var DragController = class {
     const yPos = insertAt > lineIndex ? lineCoords.bottom : lineCoords.top;
     if (this.indicatorEl) {
       if (this.indicatorEl.parentElement !== editorDom) editorDom.appendChild(this.indicatorEl);
-      this.indicatorEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.indicatorEl, true);
       this.indicatorEl.style.top = yPos - editorRect.top + "px";
       this.indicatorEl.style.left = left + "px";
       this.indicatorEl.style.width = width + "px";
@@ -6079,10 +6091,7 @@ var DragController = class {
     s.edgeDir = 0;
   }
   clearDropTarget(ds) {
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: "none" });
-    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: "none" });
-    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: "none" });
-    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: "none" });
+    this.hideAllVisuals();
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
@@ -6135,7 +6144,7 @@ var DragController = class {
    */
   showColumnSlot(hit, widget) {
     var _a;
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: "none" });
+    this.setVisual(this.indicatorEl, false);
     const ds = this.state;
     if (!ds || !hit.box) return;
     const editorDom = (_a = getCM(ds.editor)) == null ? void 0 : _a.dom;
@@ -6145,24 +6154,24 @@ var DragController = class {
     const height = `${Math.max(2, hit.box.bottom - hit.box.top)}px`;
     if (hit.kind === "gap" && this.edgeLineEl) {
       if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
-      this.edgeLineEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.edgeLineEl, true);
       this.edgeLineEl.style.left = `${hit.box.left - editorRect.left}px`;
       this.edgeLineEl.style.top = `${top}px`;
       this.edgeLineEl.style.height = height;
-      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: "none" });
+      this.setVisual(this.edgeBoxEl, false);
     } else if (this.edgeBoxEl) {
       if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
-      this.edgeBoxEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.edgeBoxEl, true);
       this.edgeBoxEl.style.left = `${hit.box.left - editorRect.left}px`;
       this.edgeBoxEl.style.top = `${top}px`;
       this.edgeBoxEl.style.width = `${Math.max(hit.box.right - hit.box.left, 8)}px`;
       this.edgeBoxEl.style.height = height;
-      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: "none" });
+      this.setVisual(this.edgeLineEl, false);
     }
     if (this.colSlotEl) {
       const slotX = (hit.kind === "before" ? hit.box.left : hit.box.right) - editorRect.left;
       if (this.colSlotEl.parentElement !== editorDom) editorDom.appendChild(this.colSlotEl);
-      this.colSlotEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.colSlotEl, true);
       this.colSlotEl.style.left = `${slotX - 1}px`;
       this.colSlotEl.style.top = `${top}px`;
       this.colSlotEl.style.height = height;
@@ -6205,7 +6214,7 @@ var DragController = class {
   }
   /** 绘制贴边分栏视觉：目标块整体描边 + 侧边竖线（side=-1 贴左，1 贴右） */
   showEdgeLine(side, box, cm) {
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: "none" });
+    this.setVisual(this.indicatorEl, false);
     const editorDom = cm.dom;
     const editorRect = editorDom.getBoundingClientRect();
     const top = box.top - editorRect.top;
@@ -6216,14 +6225,14 @@ var DragController = class {
     if (this.edgeLineEl) {
       if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
       const x = side === -1 ? left : right;
-      this.edgeLineEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.edgeLineEl, true);
       this.edgeLineEl.style.left = x + "px";
       this.edgeLineEl.style.top = top + "px";
       this.edgeLineEl.style.height = h + "px";
     }
     if (this.edgeBoxEl) {
       if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
-      this.edgeBoxEl.setCssStyles({ position: "absolute", display: "block" });
+      this.setVisual(this.edgeBoxEl, true);
       this.edgeBoxEl.style.left = left + "px";
       this.edgeBoxEl.style.top = top + "px";
       this.edgeBoxEl.style.width = Math.max(right - left, 8) + "px";

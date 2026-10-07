@@ -162,8 +162,13 @@
   max-width: 460px;
 }
 
+/* 落点线共同外观：**只管长相，不管显隐**。
+   两个消费者对 display 的需求相反 —— drag.ts 的插入线是常驻单例、要默认隐藏；
+   columns-preview 的拖出落点线每次新建、必须一挂上就可见。若把 display 写进
+   本基础类，后者就得靠 `.a.b` 特异性硬盖，改这里的 display 会让它静默变隐形
+   （历史上「怎么拖都拖不出来」正是这个坑）。故本类**不得**声明 display，
+   显隐各由下方的专属类承担。 */
 .block-editor-indicator {
-  display: none;
   position: absolute;
   height: 2px;
   background: var(--interactive-accent);
@@ -171,6 +176,24 @@
   pointer-events: none;
   /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
   z-index: 6;
+}
+
+/* drag.ts 的横向插入线：元素在 init 时创建、反复复用，必须默认隐藏，
+   落点成立时由 drag.ts 加 .is-visible 显出。 */
+.block-editor-insert-line {
+  display: none;
+}
+
+/* 落点视觉的「显示」侧统一走 .is-visible 类切换。
+   显隐是这四个元素唯一的共性状态，成组写在一起便于一眼看全、也便于 grep；
+   「默认隐藏」那一半仍写在各元素自己的规则里（就近可读）。
+   drag.ts 相应地不再用 setCssStyles 写内联 display / position ——
+   内联样式会盖住这里的规则，改 CSS 时看不出效果，两边容易走偏。 */
+.block-editor-insert-line.is-visible,
+.block-editor-edge-line.is-visible,
+.block-editor-edge-box.is-visible,
+.block-editor-col-slot.is-visible {
+  display: block;
 }
 
 .block-editor-selection-layer {
@@ -363,16 +386,13 @@ body.be-columns-live-on .block-editor-columns-row.block-editor-columns-border .b
 }
 
 /* 需求 B「拖出分栏」的落点插入线。
-   必须显式 display:block —— .block-editor-indicator 的默认样式是 display:none
-   （drag.ts 靠 setCssStyles 显隐它自己的那个实例），新建的同名元素若不覆盖
-   display 会是一条永远看不见的线。 */
-.block-editor-indicator.block-editor-col-outline {
+   与 drag.ts 的插入线共用外观基类 .block-editor-indicator，但显隐完全独立：
+   本元素每次 mousemove 新建、用完即删，**不存在「隐藏」状态**，所以自带
+   display: block（0,1,0 特异性，基础类已不含 display，不存在互相覆盖）。
+   不要为了「统一」把 display 挪回基础类 —— 那会让本线依赖特异性压制，
+   改基础类时它会静默隐形，表现为「拖不出来」。 */
+.block-editor-col-outline {
   display: block;
-  height: 2px;
-  background: var(--interactive-accent);
-  border-radius: 1px;
-  pointer-events: none;
-  z-index: 6;
 }
 
 /* 斜杠命令弹窗：条目多（转换类 30+ 项），单列会把弹窗拉得很长 → 3 列网格。

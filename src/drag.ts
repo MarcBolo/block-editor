@@ -97,8 +97,14 @@ export class DragController {
     // 指示器 / 贴边线 / 描边盒不在 init 时挂入 DOM，使用时动态挂到目标编辑器的
     // .cm-editor 上：absolute 定位 + overflow:hidden 物理裁剪，不溢出到标签页栏。
     // 拖拽幽灵（ghost）仍挂 body，需高于一切 UI 跟随鼠标。
+    //
+    // 类名分工：外观基类 .block-editor-indicator 只管长相（不含 display），
+    // 显隐由 .is-visible 这个状态类接管（见 styles.css）。
+    // 不写内联 style 显隐，是为了让它始终受 CSS 控制 —— 内联样式会盖住样式表，
+    // 改 CSS 时看不出效果，两边悄悄走偏。columns-preview 的落点线也共用同一基类，
+    // 各自独立决定显隐，互不影响。
     const indicator = createEl('div');
-    indicator.className = 'block-editor-indicator';
+    indicator.className = 'block-editor-indicator block-editor-insert-line';
     this.indicatorEl = indicator;
     // H4 贴边分栏竖线（横向插入线之上，视觉区分：竖线 = 贴边合成）
     const edgeLine = createEl('div');
@@ -114,6 +120,27 @@ export class DragController {
     const colSlot = createEl('div');
     colSlot.className = 'block-editor-col-slot';
     this.colSlotEl = colSlot;
+  }
+
+  /**
+   * 落点视觉的显隐（唯一入口）。
+   *
+   * 为什么不用 setCssStyles 写内联 display：内联样式优先级高于样式表，
+   * 一旦写进去，styles.css 里的显隐规则就再也观察不到效果 —— 两条线
+   * （drag.ts 的可复用插入线 / columns-preview 的一次性落点线）虽然共用
+   * 外观基类，但显隐必须各自独立、且都在 CSS 里可见。统一走 .is-visible
+   * 状态类后，「谁在显示」这件事只有一处真相：grep 这个类名即可。
+   */
+  private setVisual(el: HTMLElement | null, visible: boolean): void {
+    el?.classList.toggle('is-visible', visible);
+  }
+
+  /** 隐藏全部落点视觉（插入线 / 贴边线 / 描边盒 / 新栏竖条） */
+  private hideAllVisuals(): void {
+    this.setVisual(this.indicatorEl, false);
+    this.setVisual(this.edgeLineEl, false);
+    this.setVisual(this.edgeBoxEl, false);
+    this.setVisual(this.colSlotEl, false);
   }
 
   destroy(): void {
@@ -193,10 +220,7 @@ export class DragController {
 
     this.ctx.handle.setDragging(false);
     document.body.classList.remove('block-editor-dragging');
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
-    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
-    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
-    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: 'none' });
+    this.hideAllVisuals();
 
     if (!ds.moved) {
       // 视为点击 -> 打开块菜单
@@ -507,8 +531,8 @@ export class DragController {
     if (ds.edgeSide !== null) {
       ds.edgeSide = null;
       ds.edgeTargetStart = null;
-      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
-      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
+      this.setVisual(this.edgeLineEl, false);
+      this.setVisual(this.edgeBoxEl, false);
     }
 
     if (target && isNestTarget(target.type)) {
@@ -581,7 +605,7 @@ export class DragController {
     const yPos = insertAt > lineIndex ? lineCoords.bottom : lineCoords.top;
     if (this.indicatorEl) {
       if (this.indicatorEl.parentElement !== editorDom) editorDom.appendChild(this.indicatorEl);
-      this.indicatorEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.indicatorEl, true);
       this.indicatorEl.style.top = yPos - editorRect.top + 'px';
       this.indicatorEl.style.left = left + 'px';
       this.indicatorEl.style.width = width + 'px';
@@ -645,10 +669,7 @@ export class DragController {
   }
 
   private clearDropTarget(ds: DragState): void {
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
-    if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
-    if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
-    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: 'none' });
+    this.hideAllVisuals();
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
@@ -710,7 +731,7 @@ export class DragController {
    * 另加一个 colSlot 条：命中时在被插位置显示一条 accent 竖条，让"插在哪"一眼可见。
    */
   private showColumnSlot(hit: ColDropHit, widget: ColumnsWidgetLike): void {
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
+    this.setVisual(this.indicatorEl, false);
     const ds = this.state;
     if (!ds || !hit.box) return;
     // 竖线 / 描边挂在源编辑器 .cm-editor（同文档拖拽，坐标同源；overflow:hidden 会裁剪）
@@ -722,26 +743,26 @@ export class DragController {
 
     if (hit.kind === 'gap' && this.edgeLineEl) {
       if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
-      this.edgeLineEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.edgeLineEl, true);
       this.edgeLineEl.style.left = `${hit.box.left - editorRect.left}px`;
       this.edgeLineEl.style.top = `${top}px`;
       this.edgeLineEl.style.height = height;
-      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
+      this.setVisual(this.edgeBoxEl, false);
     } else if (this.edgeBoxEl) {
       if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
-      this.edgeBoxEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.edgeBoxEl, true);
       this.edgeBoxEl.style.left = `${hit.box.left - editorRect.left}px`;
       this.edgeBoxEl.style.top = `${top}px`;
       this.edgeBoxEl.style.width = `${Math.max(hit.box.right - hit.box.left, 8)}px`;
       this.edgeBoxEl.style.height = height;
-      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
+      this.setVisual(this.edgeLineEl, false);
     }
 
     // 插入位置竖条：before 画在参照栏左缘，after/gap 画在参照栏右缘
     if (this.colSlotEl) {
       const slotX = (hit.kind === 'before' ? hit.box.left : hit.box.right) - editorRect.left;
       if (this.colSlotEl.parentElement !== editorDom) editorDom.appendChild(this.colSlotEl);
-      this.colSlotEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.colSlotEl, true);
       this.colSlotEl.style.left = `${slotX - 1}px`;
       this.colSlotEl.style.top = `${top}px`;
       this.colSlotEl.style.height = height;
@@ -797,7 +818,7 @@ export class DragController {
     box: { top: number; bottom: number; left: number; right: number },
     cm: CMView
   ): void {
-    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
+    this.setVisual(this.indicatorEl, false);
     // 挂到目标编辑器 .cm-editor，视口坐标转编辑器坐标，overflow:hidden 物理裁剪
     const editorDom = cm.dom;
     const editorRect = editorDom.getBoundingClientRect();
@@ -809,14 +830,14 @@ export class DragController {
     if (this.edgeLineEl) {
       if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
       const x = side === -1 ? left : right;
-      this.edgeLineEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.edgeLineEl, true);
       this.edgeLineEl.style.left = x + 'px';
       this.edgeLineEl.style.top = top + 'px';
       this.edgeLineEl.style.height = h + 'px';
     }
     if (this.edgeBoxEl) {
       if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
-      this.edgeBoxEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.setVisual(this.edgeBoxEl, true);
       this.edgeBoxEl.style.left = left + 'px';
       this.edgeBoxEl.style.top = top + 'px';
       this.edgeBoxEl.style.width = Math.max(right - left, 8) + 'px';
