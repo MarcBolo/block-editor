@@ -11,6 +11,8 @@ import { deriveDarkColor, parseColBgMeta, setColBgVars } from './col-bg';
 import type { ColBg } from './col-bg';
 import { getCM, keepViewport, colValignToCss } from './util';
 import { safeDecoCompute } from './cm6-deco-guard';
+import { buildColLayout, buildCombinedChanges, buildExtractInsertText, columnToPlainBlock, resolveExtractLine, shouldUnwrapAfterExtract } from './columns-droptarget';
+import type { ColLayoutInfo } from './columns-droptarget';
 
 /** 调试日志：评审要求避免 console 日志，保留 no-op 维持调用点 */
 function colLog(..._args: unknown[]): void {}
@@ -748,6 +750,27 @@ function looseMap(s: string): { norm: string; idx: number[] } {
   return { norm, idx };
 }
 
+/** 按点击点在内容区中的垂直比例估源码行首偏移（锚点定位失败 / 媒体命中时兜底） */
+function estimateOffsetByRatio(content: HTMLElement, source: string, y: number): number {
+  const rect = content.getBoundingClientRect();
+  const ratio = rect.height > 0 ? Math.min(1, Math.max(0, (y - rect.top) / rect.height)) : 0;
+  const lines = source.split('\n');
+  const target = Math.round(ratio * (lines.length - 1));
+  let off = 0;
+  for (let li = 0; li < target && li < lines.length; li++) off += lines[li].length + 1;
+  return off;
+}
+
+/** 点击命中的非文本节点是否属于嵌入媒体（图片/视频/音频/画布/内嵌文件等）。
+ *  这类元素没有文本节点，需按点击位置估算源码偏移进入编辑，不能当作留白跳过。 */
+function hitIsMedia(node: Node, content: HTMLElement): boolean {
+  const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
+  // 命中容器本身（点到栏内留白）不算媒体
+  if (!el || el === content) return false;
+  const media = el.closest('img, video, audio, canvas, svg, .internal-embed, .media-embed, .file-embed');
+  return !!media && (media === content || content.contains(media));
+}
+
 /** 单击坐标 → 源码偏移；返回 null = 点到留白（不进入编辑，避免误触） */
 function sourceOffsetFromPoint(content: HTMLElement, source: string, x: number, y: number): number | null {
   const doc = content.ownerDocument;
@@ -755,10 +778,17 @@ function sourceOffsetFromPoint(content: HTMLElement, source: string, x: number, 
   // 环境无坐标查询能力（jsdom 测试）：无法定位，直接进入编辑（等价旧行为）
   if (!hasCaretApi(doc)) return 0;
   const hit = caretAtPoint(doc, x, y);
-  // 点到留白 / 命中元素节点 / 内容区外：空栏整块可点，非空栏不触发
+  // 点到留白 / 命中元素节点 / 内容区外：空栏整块可点；命中嵌入媒体（图片/视频等
+  // 无文本节点）时按点击位置估算偏移进入编辑；其余非文本命中（真正留白）不触发。
   // 注：nodeType 3 = TEXT_NODE、whatToShow 4 = SHOW_TEXT，用字面量避免依赖
   // Node / NodeFilter 全局（jsdom 等测试环境未挂载这两个全局）
-  if (!hit || !content.contains(hit.node) || hit.node.nodeType !== 3) return empty ? 0 : null;
+  if (!hit || !content.contains(hit.node) || hit.node.nodeType !== 3) {
+    if (empty) return 0;
+    if (hit && content.contains(hit.node) && hitIsMedia(hit.node, content)) {
+      return estimateOffsetByRatio(content, source, y);
+    }
+    return null;
+  }
 
   // 点击点在渲染文本中的字符偏移
   let renderedOffset = hit.offset;
@@ -785,13 +815,7 @@ function sourceOffsetFromPoint(content: HTMLElement, source: string, x: number, 
   }
 
   // 兜底：按点击点在内容区中的垂直比例估源码行首
-  const rect = content.getBoundingClientRect();
-  const ratio = rect.height > 0 ? Math.min(1, Math.max(0, (y - rect.top) / rect.height)) : 0;
-  const lines = source.split('\n');
-  const target = Math.round(ratio * (lines.length - 1));
-  let off = 0;
-  for (let li = 0; li < target && li < lines.length; li++) off += lines[li].length + 1;
-  return off;
+  return estimateOffsetByRatio(content, source, y);
 }
 
 /* ===== 不可见标记（sentinel）：编辑态隐藏行内格式标记 =====
@@ -973,6 +997,8 @@ class ColumnsWidget extends WidgetType {
   private focusCol = -1;
   private menuEl: HTMLElement | null = null;
   private colorPickerEl: HTMLElement | null = null;
+  /** 需求 B：拖出分栏时的落点插入线（挂在 .cm-editor 上，随拖拽重建/移除） */
+  private outLineEl: HTMLElement | null = null;
 
   /** 内容签名：内容/宽度/背景色/行结构/外观参数变化时装饰层会重建 widget。
    *  额外纳入分栏默认外观设置（gap/radius/valign/border）：用户在设置里改动时，
@@ -1054,12 +1080,41 @@ class ColumnsWidget extends WidgetType {
     return true;
   }
 
+  /**
+   * 供外部（drag.ts）做落点命中用的布局信息：各行的栏 DOM 元素 + 全局下标。
+   * 走 DOM 而非 CM 坐标的原因见 columns-droptarget.ts 顶部说明。
+   */
+  getLayoutInfo(): ColLayoutInfo {
+    return buildColLayout(this.colEls, this.rows);
+  }
+
+  /** 当前分栏区间的文档行范围（需求 B 判定"紧邻上行/下行"合法落点用） */
+  getLineRange(): { start: number; end: number } {
+    return { start: this.region.startLine, end: this.region.endLine };
+  }
+
+  /** 区间起点在 CM6 文档中的偏移（合并写回时定位 regionFrom） */
+  getRegionStartPos(): number {
+    return this.region.startPos;
+  }
+
+  /** 区间终点在 CM6 文档中的偏移（不含） */
+  getRegionEndPos(): number {
+    return this.region.endPos;
+  }
+
+  /** 区间末尾是否吞掉了换行（写回时决定要不要补 '\n'） */
+  hasBreak(): boolean {
+    return this.region.hasBreak;
+  }
+
   toDOM(view: EditorView): HTMLElement {
     this.parentView = view;
     const wrap = createEl('div');
     wrap.className = 'block-editor-columns-widget';
     wrap.dataset.regionStart = String(this.region.startPos);
     this.root = wrap;
+    widgetByRoot.set(wrap, this);
     // 注意：toDOM 在 CM6 的 DOM 更新过程中被调用，此时构建尚未完成、读到的
     // scrollTop 不可信（会被钳到 0）。这里不能走带视口锁定的 render()——否则
     // 会把「钳后的 0」当成本次锚点还原回去，表现为撤销/重算后整页滚到最上面。
@@ -1105,6 +1160,96 @@ class ColumnsWidget extends WidgetType {
       ends.push(acc - 1);
     }
     return ends.length ? ends : undefined;
+  }
+
+  /**
+   * 当前内存状态对应的分栏 markdown 区间文本（含 hasBreak 的尾随换行）。
+   * 供外部拖拽路径拼装"区间重写 + 区间外插入"的单事务 changes。
+   */
+  buildRegionText(): string {
+    return (
+      buildColumnsMarkdown(
+        this.texts,
+        this.widths,
+        this.bgs,
+        this.rowEnds,
+        Object.keys(this.opts).length ? this.opts : undefined
+      ) + (this.region.hasBreak ? '\n' : '')
+    );
+  }
+
+  /**
+   * 在指定全局栏位置插入一栏（需求 A：文档块拖入分栏）。
+   * 只改内存状态不写回 —— 写回由调用方合并进单事务，保证单步撤销。
+   *
+   * @param insertIndex 全局插入下标（0 = 最前，texts.length = 末尾）
+   * @param text        新栏内容（已剥引用前缀的裸 markdown）
+   * @returns 是否插入成功（越界或空内容时 false）
+   */
+  insertColumnAt(insertIndex: number, text: string): boolean {
+    const at = Math.max(0, Math.min(insertIndex, this.texts.length));
+    if (!text.trim()) return false;
+    const n = this.texts.length + 1;
+    const newW = Math.round((100 / n) * 10) / 10;
+    const scale = (100 - newW) / 100;
+    // 已有宽度按比例缩小，让新栏占 100/n；无宽度元数据时留给均分兜底
+    if (this.widths.length === this.texts.length) {
+      this.widths = this.widths.map((w) => Math.round(w * scale * 10) / 10);
+      this.widths.splice(at, 0, newW);
+    }
+    this.texts.splice(at, 0, text);
+    this.bgs.splice(at, 0, null);
+    // 多行分栏：插入点所在行的栏数 +1（不新增行，只加宽该行）
+    if (this.rows.length) {
+      const r = this.rowIndexOf(at);
+      this.rows[r]++;
+    }
+    return true;
+  }
+
+  /**
+   * 移除指定栏并返回其内容（需求 B：栏拖出分栏）。
+   * 只改内存状态不写回 —— 同 insertColumnAt，由调用方合并进单事务。
+   *
+   * 宽度按比例分给剩余栏；剩 1 栏时清空宽度元数据（配合调用方降级为取消分栏）。
+   *
+   * @returns 被移除栏的文本；下标非法返回 null
+   */
+  removeColumnAt(i: number): string | null {
+    if (i < 0 || i >= this.texts.length) return null;
+    const removed = this.texts[i];
+    this.texts.splice(i, 1);
+    this.bgs.splice(i, 1);
+    if (this.widths.length === this.texts.length + 1) {
+      this.widths.splice(i, 1);
+      const sum = this.widths.reduce((a, b) => a + b, 0) || 1;
+      this.widths = this.widths.map((w) => Math.round((w / sum) * 100 * 10) / 10);
+    } else {
+      this.widths = [];
+    }
+    if (this.rows.length) {
+      const r = this.rowIndexOf(i);
+      this.rows[r]--;
+      // 行内栏删光且还有其它行：移除该行（行结构保持 ≥1 行）
+      if (this.rows[r] <= 0 && this.rows.length > 1) this.rows.splice(r, 1);
+    }
+    return removed;
+  }
+
+  /** 剩余栏数（需求 B 判定是否降级为取消分栏） */
+  columnCount(): number {
+    return this.texts.length;
+  }
+
+  /**
+   * 剩余栏全部拼成普通段落文本（降级为取消分栏时用）。
+   * 与 convert.ts 的 unwrapColumns 语义一致：栏间用空行分隔、剥掉引用前缀。
+   */
+  buildUnwrappedText(): string {
+    return this.texts
+      .map((t) => t.replace(/\s+$/, ''))
+      .filter((t) => t.length > 0)
+      .join('\n\n');
   }
 
   /** 重建 widget DOM（交互操作入口专用：菜单/拖拽/进入退出编辑）。
@@ -1600,31 +1745,162 @@ class ColumnsWidget extends WidgetType {
     const startY = e.clientY;
     let dragging = false;
     let hover = -1;
+    /** 需求 B：当前合法的「拖出到分栏外」落点行号（null = 无合法落点，不显示提示） */
+    let outLine: number | null = null;
+    // 诊断日志：需求 B 的落点判定分层很多（命中栏 / widget 内 / 编辑器外 / 行号不合法），
+    // 任一环返回 null 都会「静默无反应」。保留前缀日志，便于用户直接粘控制台定位到第几步。
+    const dbg = (...a: unknown[]): void => {
+      console.log('[block-editor] col-drag:', ...a);
+    };
+    dbg('gripDown', { from, cols: this.colEls.length, start: this.region.startLine, end: this.region.endLine });
     const clearDrop = () => this.colEls.forEach((c) => c.classList.remove('block-editor-col-drop'));
+    /** 源栏拖拽态描边：让用户看得见「这一栏已经被抓起来了」 */
+    const setDragging = (on: boolean): void => {
+      const c = this.colEls[from];
+      if (c) c.classList.toggle('block-editor-col-dragging', on);
+    };
     const detach = (): void => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       window.removeEventListener('blur', onCancel);
     };
+    /**
+     * 只移除落点线的 DOM，**不动** outLine 状态。
+     *
+     * 必须与 clearOutLine 分开：showOutLine 重画线之前要移除上一条线，若复用
+     * clearOutLine（它同时把 outLine 置 null），就会在「刚算出合法落点」之后
+     * 立刻把状态清掉 —— onMove 每次都算出同一个值、每次都被自己清成 null，
+     * 松手时 finalOutLine 恒为 null，提取永不触发。
+     * 表现为：日志里 outLine 94 反复打印（每次都算作「值变化」），但 up 时是 null。
+     */
+    const removeOutLineEl = (): void => {
+      if (this.outLineEl) {
+        this.outLineEl.remove();
+        this.outLineEl = null;
+      }
+    };
+    /** 隐藏拖出落点插入线并清空落点状态（仅用于拖拽结束 / 落点变非法） */
+    const clearOutLine = (): void => {
+      removeOutLineEl();
+      outLine = null;
+    };
+    /**
+     * 需求 B：指针在 widget 外时计算合法落点。
+     * 只认分栏块的紧邻上行 / 下行 —— 其余位置（栏之间、其他块内部、更远的行）
+     * 一律不合法，不显示任何提示，松手即取消。
+     */
+    const computeOutLine = (ev: MouseEvent): number | null => {
+      const view = this.parentView;
+      if (!view) return null;
+      // 指针仍在 widget 内 → 不是拖出场景（要么是栏间换序，要么无效）
+      if (this.root && document.elementFromPoint?.(ev.clientX, ev.clientY)?.closest?.('.block-editor-columns-widget') === this.root) {
+        return null;
+      }
+      // 指针不在任何 markdown 编辑器内 → 无落点
+      if (!editorDomAtPoint(ev.clientX, ev.clientY, view)) return null;
+      const pos = view.posAtCoords({ x: ev.clientX, y: ev.clientY });
+      if (pos == null) return null;
+      const { start, end } = this.getLineRange();
+      const doc = view.state.doc;
+      const l = doc.lineAt(pos);
+      // 编辑器惯例：指针落在某行的上半 → 插到该行之前；下半 → 插到该行之后。
+      // 这样每一行都有两个可选落点，配合「区间外任意行」的规则即可自由定位。
+      const top = view.coordsAtPos(l.from)?.top;
+      const bottom = view.coordsAtPos(l.to)?.bottom;
+      const mid = top != null && bottom != null ? (top + bottom) / 2 : null;
+      const after = mid != null && ev.clientY >= mid;
+      const target = (l.number - 1) + (after ? 1 : 0);
+      return resolveExtractLine(start, end, target);
+    };
+    /** 画拖出落点插入线（贴在 .cm-editor 上，overflow:hidden 裁剪） */
+    const showOutLine = (ev: MouseEvent, line: number): void => {
+      const view = this.parentView;
+      if (!view || !view.dom) return;
+      const doc = view.state.doc;
+      const editorRect = view.dom.getBoundingClientRect();
+      const contentRect = view.contentDOM.getBoundingClientRect();
+      // 追加到文末：线画在最后一行的底部
+      if (line >= doc.lines) {
+        const last = doc.line(doc.lines);
+        const c = view.coordsAtPos(last.to);
+        if (!c) return;
+        removeOutLineEl();
+        const el = createEl('div');
+        el.className = 'block-editor-indicator block-editor-col-outline';
+        el.style.display = 'block';
+        el.style.position = 'absolute';
+        el.style.left = `${contentRect.left - editorRect.left}px`;
+        el.style.width = `${Math.max(contentRect.width, 40)}px`;
+        el.style.top = `${(c.bottom ?? c.top) - editorRect.top - 1}px`;
+        view.dom.appendChild(el);
+        this.outLineEl = el;
+        return;
+      }
+      const l = doc.line(line + 1);
+      const c = view.coordsAtPos(l.from);
+      if (!c) return;
+      // 只移除上一条线的 DOM：不能用 clearOutLine()，否则会把刚算出的 outLine 清成 null
+      removeOutLineEl();
+      const el = createEl('div');
+      // 必须同时挂 col-outline 并显式 display:block —— .block-editor-indicator 的
+      // 默认样式是 display:none（供 drag.ts 用 setCssStyles 显隐），只复制这个类名
+      // 会得到一条**永远不可见**的线，用户看不到任何落点反馈，表现为「拖不出来」。
+      el.className = 'block-editor-indicator block-editor-col-outline';
+      el.style.display = 'block';
+      el.style.position = 'absolute';
+      el.style.left = `${contentRect.left - editorRect.left}px`;
+      el.style.width = `${Math.max(contentRect.width, 40)}px`;
+      el.style.top = `${c.top - editorRect.top - 1}px`;
+      view.dom.appendChild(el);
+      this.outLineEl = el;
+    };
     const onMove = (ev: MouseEvent) => {
       if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) <= THRESHOLD) return;
-      dragging = true;
+      if (!dragging) {
+        dragging = true;
+        setDragging(true);
+        dbg('drag start');
+      }
       const el = document.elementFromPoint?.(ev.clientX, ev.clientY)?.closest('.block-editor-col-editor');
       hover = el ? this.colEls.indexOf(el as HTMLElement) : -1;
       this.colEls.forEach((c, k) => c.classList.toggle('block-editor-col-drop', k === hover && hover !== from));
+      // 命中栏 → 栏间换序，清掉拖出提示；未命中 → 尝试算拖出落点
+      if (hover !== -1) clearOutLine();
+      else {
+        const line = computeOutLine(ev);
+        // 只在落点变化时打日志，避免每次 mousemove 刷屏
+        if (line !== outLine) dbg('outLine', line, { hover });
+        outLine = line;
+        if (line === null) clearOutLine();
+        else showOutLine(ev, line);
+      }
     };
     // 失焦（指针移出窗口 / 切换应用）时取消拖拽并解绑，避免监听残留
     const onCancel = (): void => {
       detach();
       clearDrop();
+      setDragging(false);
+      clearOutLine();
     };
     const onUp = (ev: MouseEvent) => {
       detach();
       clearDrop();
+      setDragging(false);
+      // 必须在 clearOutLine() 之前捕获落点行号：clearOutLine 会把 outLine 置 null，
+      // 若顺序颠倒，下面的提取分支永远读到 null（表现为「怎么拖都拖不出来」）。
+      const finalOutLine = outLine;
+      clearOutLine();
+      dbg('up', { finalOutLine, hover, dragging, alt: ev.altKey });
       if (!dragging) {
         // 点击（未拖动）：弹出命令菜单
         this.showColMenu(ev, from);
         return;
+      }
+      // 需求 B 优先：拖到分栏外的合法落点 → 该栏脱离分栏成为普通块
+      if (finalOutLine !== null && hover === -1) {
+        const done = this.extractColumnTo(from, finalOutLine, ev.altKey);
+        dbg('extract', done);
+        if (done) return;
       }
       const el = document.elementFromPoint?.(ev.clientX, ev.clientY)?.closest('.block-editor-col-editor') as HTMLElement | null;
       const to = el ? this.colEls.indexOf(el) : -1;
@@ -1644,6 +1920,70 @@ class ColumnsWidget extends WidgetType {
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     window.addEventListener('blur', onCancel);
+  }
+
+  /**
+   * 需求 B 落地：把第 i 栏移出分栏，作为普通块插入到 line 行之前。
+   *
+   * 单步撤销：「区间重写（分栏少一栏）」+「区间外插入（普通块）」合并进同一
+   * Transaction，理由同 commitColumnDrop。
+   *
+   * 边界规则（已与用户确认）：
+   *  - 拖出后剩 1 栏 → 自动降级为取消分栏，整段还原为普通段落
+   *  - 被拖出栏的宽度按比例分给剩余栏（removeColumnAt 内部处理）
+   *  - 空栏禁止拖出（拖出去也没有内容）
+   *  - 行末栏可拖出到分栏外（跨行合并由 mergeColumns 负责，此处不拦）
+   *
+   * @param line  目标插入行号（0-based，插到该行之前）
+   * @param copy  Alt = 复制到分栏外，栏仍保留
+   * @returns 是否已提交
+   */
+  private extractColumnTo(i: number, line: number, copy: boolean): boolean {
+    const view = this.parentView;
+    if (!view) return false;
+    const text = this.texts[i] ?? '';
+    if (!text.trim()) return false;
+    const plain = columnToPlainBlock(text).trim();
+    if (!plain) return false;
+
+    const doc = view.state.doc;
+    const regionFrom = this.region.startPos;
+    const regionTo = this.region.endPos;
+    const lines: string[] = [];
+    for (let k = 1; k <= doc.lines; k++) lines.push(doc.line(k).text);
+
+    // 自由落点：line 表示「插到第 line 行之前」，line === doc.lines 表示追加到文末
+    const insert = buildExtractInsertText(plain, lines, line, {
+      start: this.region.startLine,
+      end: this.region.endLine,
+      hasBreak: this.region.hasBreak,
+    });
+    if (!insert) return false;
+    const lineFrom = line >= doc.lines ? doc.length : doc.line(line + 1).from;
+
+    // Alt 复制：分栏结构不变，只在区间外插入
+    if (copy) {
+      keepViewport(view, () => {
+        view.dispatch({ changes: buildCombinedChanges(regionFrom, regionTo, this.buildRegionText(), { pos: lineFrom, text: insert }) });
+      });
+      return true;
+    }
+
+    const removed = this.removeColumnAt(i);
+    if (removed === null) return false;
+
+    // 剩 1 栏 → 降级为取消分栏：整段替换为剩余栏的纯文本。
+    // 落点不再受限，故与常规路径一样走「区间重写 + 区间外插入」的合并事务，
+    // 不能像早期版本那样把拖出内容拼进 region 文本（那样只能插在紧邻位置）。
+    const regionText = shouldUnwrapAfterExtract(this.columnCount())
+      ? this.buildUnwrappedText() + (this.region.hasBreak ? '\n' : '')
+      : this.buildRegionText();
+
+    keepViewport(view, () => {
+      view.dispatch({ changes: buildCombinedChanges(regionFrom, regionTo, regionText, { pos: lineFrom, text: insert }) });
+    });
+    this.render();
+    return true;
   }
 
   // ---- grip 命令菜单：设置背景色 / 新增栏 / 删除栏（横排纯图标） ----
@@ -2028,6 +2368,49 @@ const widgetCache = new Map<
   { path: string; owner: unknown; key: string; widget: ColumnsWidget }
 >();
 let sharedCtx: BlockEditorPlugin | null = null;
+
+/**
+ * DOM 根元素 → widget 实例的注册表。
+ *
+ * 需求 A/B 的落点命中必须从 DOM 反查 widget（elementFromPoint 拿到的只是元素，
+ * 而栏信息存在 widget 实例上）。此处以 toDOM 建的 wrap 为键建反向索引，
+ * widget 销毁 / DOM 重建时自动失效（WeakMap 弱引用，不阻止回收）。
+ */
+const widgetByRoot = new WeakMap<HTMLElement, ColumnsWidget>();
+
+/**
+ * 取指针位置下的分栏 widget（需求 A：命中栏 → 新增栏；需求 B：判定是否拖出）。
+ * 未命中任何分栏返回 null。
+ *
+ * 命中判定用 elementFromPoint 而非 CM6 posAtCoords：widget 是 ignoreEvent 的
+ * block 替换装饰，posAtCoords 只能给出整个区间的替换位置，取不到"第几栏"。
+ */
+export function columnsWidgetAtPoint(x: number, y: number): ColumnsWidget | null {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return null;
+  const root = el.closest('.block-editor-columns-widget');
+  if (!(root instanceof HTMLElement)) return null;
+  return widgetByRoot.get(root) ?? null;
+}
+
+/** 调试 / 测试用：当前存活的 widget 实例（按插入顺序） */
+export function allColumnsWidgets(): ColumnsWidget[] {
+  return [...widgetCache.values()].map((e) => e.widget);
+}
+
+/**
+ * 指针是否落在指定编辑器视图的可视区域内。
+ *
+ * 需求 B 用：`posAtCoords` 对编辑器之外的坐标会返回最近的合法位置（不保证 null），
+ * 若不先做区域校验，把栏拖到标签页栏 / 侧边栏 / 窗口空白处也会被误判为合法落点，
+ * 表现为"松手就粘到奇怪的位置"。
+ */
+export function editorDomAtPoint(x: number, y: number, view: EditorView): boolean {
+  const dom = view?.dom;
+  if (!dom) return false;
+  const r = dom.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+}
 
 /** 装饰构建：整个分栏区域替换为交互 widget */
 function buildDecorations(state: DecorState, regions: ColumnsRegion[]): DecorationSet {

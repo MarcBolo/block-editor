@@ -1,7 +1,15 @@
 import type { Editor, MarkdownView, TFile } from 'obsidian';
 import type { BlockContext, BlockRange, BlockType, CMView } from './types';
 import type BlockEditorPlugin from './main';
-import { getCM, getIndent, getLines } from './util';
+import { getCM, getIndent, getLines, keepViewport } from './util';
+import { columnsWidgetAtPoint } from './columns-preview';
+import {
+  buildCombinedChanges,
+  collectDraggedLines,
+  hitColumnsLayout,
+  stripQuotePrefixes,
+} from './columns-droptarget';
+import type { ColDropHit } from './columns-droptarget';
 
 interface DragState {
   editor: Editor;
@@ -22,6 +30,10 @@ interface DragState {
   edgeTargetStart: number | null;
   /** 拖入普通段落/标题时需「列表化」的目标首行（null 表示非此类嵌套） */
   listifyTargetLine: number | null;
+  /** 需求 A：命中分栏 widget 的落点（新增一栏），null 表示未命中分栏 */
+  colHit: ColDropHit | null;
+  /** 需求 A：命中分栏所属的 widget（写回时用其区间与状态） */
+  colWidget: ColumnsWidgetLike | null;
   startY: number;
   startX: number;
   lastX: number;
@@ -30,6 +42,21 @@ interface DragState {
   scrollTimer: number | null;
   moved: boolean;
 }
+
+/**
+ * drag.ts 实际用到的 ColumnsWidget 表面（局部声明避免与 columns-preview 形成
+ * 类型环：columns-preview 不 import drag.ts，此处用结构化子类型解耦）。
+ */
+interface ColumnsWidgetLike {
+  getLayoutInfo(): ReturnType<typeof import('./columns-droptarget').buildColLayout>;
+  getLineRange(): { start: number; end: number };
+  getRegionStartPos(): number;
+  getRegionEndPos(): number;
+  hasBreak(): boolean;
+  insertColumnAt(insertIndex: number, text: string): boolean;
+  buildRegionText(): string;
+}
+
 
 /** 分栏外壳标记（拖拽嵌套引用时排除，避免插入点落在分栏内部截断结构） */
 const COL_SHELL_RE = /^\s*>\s*\[!multi-column(?:\|[^\]]*)?\]/;
@@ -61,6 +88,8 @@ export class DragController {
   private indicatorEl: HTMLElement | null = null;
   private edgeLineEl: HTMLElement | null = null;
   private edgeBoxEl: HTMLElement | null = null;
+  /** 需求 A：分栏内「新栏插在这里」的位置竖条 */
+  private colSlotEl: HTMLElement | null = null;
 
   constructor(private ctx: BlockEditorPlugin) {}
 
@@ -80,6 +109,11 @@ export class DragController {
     const edgeBox = createEl('div');
     edgeBox.className = 'block-editor-edge-box';
     this.edgeBoxEl = edgeBox;
+    // 需求 A：分栏内插入位置竖条（accent 色，宽度 2px，与 edge-line 区分：
+    // edge-line 是"贴边合成分栏"的语义竖线，本条是"新栏插这里"的插入位）
+    const colSlot = createEl('div');
+    colSlot.className = 'block-editor-col-slot';
+    this.colSlotEl = colSlot;
   }
 
   destroy(): void {
@@ -91,6 +125,8 @@ export class DragController {
     this.edgeLineEl = null;
     this.edgeBoxEl?.remove();
     this.edgeBoxEl = null;
+    this.colSlotEl?.remove();
+    this.colSlotEl = null;
     this.state = null;
     document.body.classList.remove('block-editor-dragging');
   }
@@ -134,6 +170,8 @@ export class DragController {
       edgeSide: null,
       edgeTargetStart: null,
       listifyTargetLine: null,
+      colHit: null,
+      colWidget: null,
       startY: e.clientY,
       startX: e.clientX,
       lastX: e.clientX,
@@ -158,6 +196,7 @@ export class DragController {
     if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
     if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
     if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
+    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: 'none' });
 
     if (!ds.moved) {
       // 视为点击 -> 打开块菜单
@@ -169,6 +208,15 @@ export class DragController {
         type: ds.type,
       });
       return;
+    }
+
+    // 需求 A：拖入分栏新增栏。放在贴边分栏之前 —— 分栏命中时 ds.edgeSide 必为 null，
+    // 两者几何互斥，顺序不影响正确性；置前让"进分栏"优先于"贴边合成"。
+    if (ds.colHit && ds.colWidget) {
+      if (this.commitColumnDrop(ds, ds.colWidget, ds.colHit, e.altKey)) {
+        this.ctx.handle.hideHandle();
+        return;
+      }
     }
 
     // 四向落区·贴边分栏：松手时若仍命中贴边热区（同文档），把拖动块与目标块
@@ -225,6 +273,66 @@ export class DragController {
     this.ctx.handle.hideHandle();
   }
 
+  /**
+   * 需求 A 落地：把被拖块作为一栏插入目标分栏的 hit.insertIndex 位置。
+   *
+   * 单步撤销的实现要点：这里是「区间重写（分栏插入新栏）」+「区间外删除（源块）」
+   * 两处编辑，必须合并进**同一个 Transaction**。若先写回分栏、再单独删除源块，
+   * 会产生两步撤销，Ctrl+Z 一次只能撤一半。
+   * CM6 的 state.update({changes: [...]}) 接受多段编辑并作为整体回滚，
+   * 已用 temp/verify-single-trx.mjs 验证 invert() 能干净还原。
+   *
+   * 源块可能位于分栏区间之前或之后，两处编辑互不重叠，CM6 可安全合并。
+   *
+   * @param copy Alt = 复制到新栏，源块保留
+   * @returns 是否已提交（false 表示落点已失效，调用方应回退普通移动）
+   */
+  private commitColumnDrop(
+    ds: DragState,
+    widget: ColumnsWidgetLike,
+    hit: ColDropHit,
+    copy: boolean
+  ): boolean {
+    const cm = getCM(ds.editor);
+    if (!cm) return false;
+
+    const lines = collectDraggedLines(ds.editor, ds.ranges);
+    const text = stripQuotePrefixes(lines);
+    if (!text.trim()) return false;
+
+    const range = widget.getLineRange();
+    // 拖拽期间文档未变，但保险起见复核区间未越界（结构被外部改动时放弃本次落点）
+    const doc = cm.state.doc;
+    if (range.start < 0 || range.end >= doc.lines) return false;
+
+    if (!widget.insertColumnAt(hit.insertIndex, text)) return false;
+
+    const changes = buildCombinedChanges(
+      widget.getRegionStartPos(),
+      widget.getRegionEndPos(),
+      widget.buildRegionText(),
+      null
+    );
+
+    if (!copy) {
+      // 删除源块：多选时按行号升序逐段删除，每段含行尾换行（与 ops.removeRanges 同语义）
+      const sorted = [...ds.ranges].sort((a, b) => a.start - b.start);
+      for (const r of sorted) {
+        const from = doc.line(r.start + 1).from;
+        // 末行块不能带换行（会越过文档尾），改为删到本行行尾
+        const to =
+          r.end < doc.lines - 1 ? doc.line(r.end + 2).from : doc.line(r.end + 1).to;
+        changes.push({ from, to, insert: '' });
+      }
+    }
+
+    // 视口锁定：区间重写 + 源块删除会让 CM6 重算视口，钉住 scrollTop 停在原位置
+    keepViewport(cm, () => {
+      cm.dispatch({ changes });
+    });
+    return true;
+  }
+
   onDragMove(e: MouseEvent): void {
     const ds = this.state;
     if (!ds) return;
@@ -259,6 +367,8 @@ export class DragController {
 
   // 当前落点对应的动作状态；无有效落点（拖回自身 / 无效区域）返回 null，此时不显示标签
   private resolveAction(ds: DragState, altKey: boolean): string | null {
+    // 需求 A：命中分栏 → 新增一栏（该路径优先于贴边，几何上已互斥）
+    if (ds.colHit) return altKey ? 'col-new-copy' : 'col-new';
     // 贴边分栏优先：松手直接与目标块合成两栏（该路径不响应 Alt）
     if (ds.edgeSide === -1) return 'column-left';
     if (ds.edgeSide === 1) return 'column-right';
@@ -298,6 +408,25 @@ export class DragController {
       return;
     }
     const cross = !sameDoc;
+
+    // 需求 A：命中分栏 widget → 新增一栏。
+    // 必须放在 posAtCoords 之前：widget 是 ignoreEvent 的 block 替换装饰，
+    // posAtCoords 对栏内只能给出整个区间的替换位置，取不到"第几栏"。
+    // 命中即 return，不进入后面的行号 / 嵌套 / 贴边判定（几何互斥）。
+    if (!cross) {
+      const colWidget = columnsWidgetAtPoint(x, y);
+      if (colWidget) {
+        if (this.tryColumnDropTarget(ds, colWidget, x, y)) return;
+        // 命中分栏但资格校验不过（拖源是分栏本身 / 与区间重叠）：不给落点提示
+        this.clearDropTarget(ds);
+        return;
+      }
+    }
+    // 未命中分栏：清掉上一轮残留的分栏态，避免指针从分栏移出后仍走建栏分支
+    if (ds.colHit !== null) {
+      ds.colHit = null;
+      ds.colWidget = null;
+    }
 
     const pos = cm.posAtCoords({ x, y });
     if (pos == null) {
@@ -519,6 +648,7 @@ export class DragController {
     if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
     if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
     if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
+    if (this.colSlotEl) this.colSlotEl.setCssStyles({ display: 'none' });
     ds.targetLine = null;
     ds.nestCol = null;
     ds.quotePrefix = null;
@@ -526,6 +656,96 @@ export class DragController {
     ds.edgeSide = null;
     ds.edgeTargetStart = null;
     ds.listifyTargetLine = null;
+    ds.colHit = null;
+    ds.colWidget = null;
+  }
+
+  /**
+   * 需求 A：指针命中分栏 widget 时的落点判定 + 视觉。
+   *
+   * 资格校验（任一不满足即返回 false，不给落点）：
+   *  - 拖源不得是分栏外壳行、不得位于分栏内部（否则等于把分栏塞进自己的栏里）
+   *  - 拖源区间不得与目标分栏区间重叠（防自拖）
+   *  - 被拖内容剥掉引用前缀后不能为空（空栏无意义）
+   *
+   * @returns true 表示已命中分栏落点（调用方应 return，不再走后续行号逻辑）
+   */
+  private tryColumnDropTarget(
+    ds: DragState,
+    widget: ColumnsWidgetLike,
+    x: number,
+    y: number
+  ): boolean {
+    const lines = collectDraggedLines(ds.editor, ds.ranges);
+    const text = stripQuotePrefixes(lines);
+    if (!text.trim()) return false;
+
+    const range = widget.getLineRange();
+    for (const r of ds.ranges) {
+      if (COL_SHELL_RE.test(ds.editor.getLine(r.start))) return false;
+      if (this.ctx.converter.insideColumns(ds.editor, r)) return false;
+      if (r.start <= range.end && range.start <= r.end) return false;
+    }
+
+    const hit = hitColumnsLayout(widget.getLayoutInfo(), x, y);
+    if (!hit) return false;
+
+    ds.colHit = hit;
+    ds.colWidget = widget;
+    ds.targetLine = null;
+    ds.nestCol = null;
+    ds.quotePrefix = null;
+    ds.targetEditor = null;
+    ds.edgeSide = null;
+    ds.edgeTargetStart = null;
+    ds.listifyTargetLine = null;
+    this.showColumnSlot(hit, widget);
+    return true;
+  }
+
+  /**
+   * 需求 A 的落点视觉：
+   *  - kind='gap'  → 在两栏之间画一条竖线（复用 edgeLine，明确"插在缝里"）
+   *  - kind='before'/'after' → 给参照栏描边（复用 edgeBox，与贴边分栏同一视觉语言）
+   * 另加一个 colSlot 条：命中时在被插位置显示一条 accent 竖条，让"插在哪"一眼可见。
+   */
+  private showColumnSlot(hit: ColDropHit, widget: ColumnsWidgetLike): void {
+    if (this.indicatorEl) this.indicatorEl.setCssStyles({ display: 'none' });
+    const ds = this.state;
+    if (!ds || !hit.box) return;
+    // 竖线 / 描边挂在源编辑器 .cm-editor（同文档拖拽，坐标同源；overflow:hidden 会裁剪）
+    const editorDom = getCM(ds.editor)?.dom;
+    if (!editorDom) return;
+    const editorRect = editorDom.getBoundingClientRect();
+    const top = hit.box.top - editorRect.top;
+    const height = `${Math.max(2, hit.box.bottom - hit.box.top)}px`;
+
+    if (hit.kind === 'gap' && this.edgeLineEl) {
+      if (this.edgeLineEl.parentElement !== editorDom) editorDom.appendChild(this.edgeLineEl);
+      this.edgeLineEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.edgeLineEl.style.left = `${hit.box.left - editorRect.left}px`;
+      this.edgeLineEl.style.top = `${top}px`;
+      this.edgeLineEl.style.height = height;
+      if (this.edgeBoxEl) this.edgeBoxEl.setCssStyles({ display: 'none' });
+    } else if (this.edgeBoxEl) {
+      if (this.edgeBoxEl.parentElement !== editorDom) editorDom.appendChild(this.edgeBoxEl);
+      this.edgeBoxEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.edgeBoxEl.style.left = `${hit.box.left - editorRect.left}px`;
+      this.edgeBoxEl.style.top = `${top}px`;
+      this.edgeBoxEl.style.width = `${Math.max(hit.box.right - hit.box.left, 8)}px`;
+      this.edgeBoxEl.style.height = height;
+      if (this.edgeLineEl) this.edgeLineEl.setCssStyles({ display: 'none' });
+    }
+
+    // 插入位置竖条：before 画在参照栏左缘，after/gap 画在参照栏右缘
+    if (this.colSlotEl) {
+      const slotX = (hit.kind === 'before' ? hit.box.left : hit.box.right) - editorRect.left;
+      if (this.colSlotEl.parentElement !== editorDom) editorDom.appendChild(this.colSlotEl);
+      this.colSlotEl.setCssStyles({ position: 'absolute', display: 'block' });
+      this.colSlotEl.style.left = `${slotX - 1}px`;
+      this.colSlotEl.style.top = `${top}px`;
+      this.colSlotEl.style.height = height;
+    }
   }
 
   /** 贴边分栏目标判定：目标不能为空行、不能是分栏外壳，也不能在分栏内部（避免截断结构） */

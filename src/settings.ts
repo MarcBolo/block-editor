@@ -6,6 +6,7 @@ import type {
   SliderComponent,
 } from 'obsidian';
 import type BlockEditorPlugin from './main';
+import { DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT } from './constants';
 import { recomputeColumnsEditors } from './columns-preview';
 import { DONATE_CODES, type DonateCode } from './donate';
 import { ImagePreviewModal } from './modal';
@@ -27,6 +28,8 @@ export interface BlockEditorSettings {
   blockHoverHighlightOpacity: number;
   /** 启用 / 斜杠命令 */
   slashCommands: boolean;
+  /** 行内斜杠命令：非行首输入 / 触发（只给附件插入类） */
+  slashInlineCommands: boolean;
   /** 拖拽到编辑区边缘自动滚动 */
   dragAutoScroll: boolean;
   /** 缩进步长（空格数），0 表示自动检测全文最小缩进 */
@@ -49,6 +52,31 @@ export interface BlockEditorSettings {
   dragThreshold: number;
   /** 点击内部链接时的打开位置 */
   linkOpenMode: LinkOpenMode;
+  // 斜杠「插入类」命令
+  /** 日期格式（token：YYYY / MM / DD / ddd / dddd） */
+  dateFormat: string;
+  /** 时间格式（token：HH / mm / ss） */
+  timeFormat: string;
+  /** 命令开关：日期 */
+  insDate: boolean;
+  /** 命令开关：时间 */
+  insTime: boolean;
+  /** 命令开关：日期时间 */
+  insDateTime: boolean;
+  /** 命令开关：行内公式 */
+  insMath: boolean;
+  /** 命令开关：行内代码 */
+  insInlineCode: boolean;
+  /** 命令开关：高亮 */
+  insHighlight: boolean;
+  /** 命令开关：笔记链接 */
+  insNote: boolean;
+  /** 命令开关：嵌入笔记 */
+  insEmbedNote: boolean;
+  /** 命令开关：块引用 */
+  insBlockRef: boolean;
+  /** 命令开关：嵌入块 */
+  insBlockEmbed: boolean;
 }
 
 // 除新增项外，默认值等于重构前的内置行为
@@ -59,6 +87,7 @@ export const DEFAULT_SETTINGS: BlockEditorSettings = {
   blockHoverHighlightColor: '',
   blockHoverHighlightOpacity: 0.55,
   slashCommands: true,
+  slashInlineCommands: true,
   dragAutoScroll: true,
   indentStep: 0,
   livePreviewWidget: true,
@@ -69,6 +98,18 @@ export const DEFAULT_SETTINGS: BlockEditorSettings = {
   handleSize: 20,
   dragThreshold: 4,
   linkOpenMode: 'current',
+  dateFormat: DEFAULT_DATE_FORMAT,
+  timeFormat: DEFAULT_TIME_FORMAT,
+  insDate: true,
+  insTime: true,
+  insDateTime: true,
+  insMath: true,
+  insInlineCode: true,
+  insHighlight: true,
+  insNote: true,
+  insEmbedNote: true,
+  insBlockRef: true,
+  insBlockEmbed: true,
 };
 
 /** M4：把分栏默认外观 / 手柄尺寸写到 body CSS 变量，styles.css 以 var() 消费。
@@ -194,6 +235,11 @@ export class BlockEditorSettingTab extends PluginSettingTab {
             control: { type: 'toggle', key: 'slashCommands' },
           },
           {
+            name: '行内斜杠命令（插入附件）',
+            desc: '非行首输入 /（如「文字/图」「sdfs /」）只提供图片 / 音频 / 视频 / PDF 插入；行首 / 仍是完整菜单。C:/、https:// 等路径形态不会触发',
+            control: { type: 'toggle', key: 'slashInlineCommands' },
+          },
+          {
             name: '拖拽自动滚动',
             desc: '拖动块到编辑区上下边缘时自动滚动',
             control: { type: 'toggle', key: 'dragAutoScroll' },
@@ -261,6 +307,72 @@ export class BlockEditorSettingTab extends PluginSettingTab {
             max: 16,
             step: 1,
           }),
+        ],
+      },
+      {
+        type: 'group',
+        heading: '斜杠命令 · 插入类',
+        items: [
+          {
+            name: '日期格式',
+            desc: '可用 token：YYYY 年、MM 月、DD 日、ddd 周三、dddd 星期三；其余字符原样保留',
+            control: { type: 'text', key: 'dateFormat' },
+          },
+          {
+            name: '时间格式',
+            desc: '可用 token：HH 时、mm 分、ss 秒；其余字符原样保留',
+            control: { type: 'text', key: 'timeFormat' },
+          },
+          {
+            name: '日期',
+            desc: '插入今天的日期（按上面的日期格式）',
+            control: { type: 'toggle', key: 'insDate' },
+          },
+          {
+            name: '时间',
+            desc: '插入当前时间',
+            control: { type: 'toggle', key: 'insTime' },
+          },
+          {
+            name: '日期时间',
+            desc: '插入「日期 + 空格 + 时间」',
+            control: { type: 'toggle', key: 'insDateTime' },
+          },
+          {
+            name: '行内公式',
+            desc: '插入 $ $，光标停在两个 $ 中间',
+            control: { type: 'toggle', key: 'insMath' },
+          },
+          {
+            name: '行内代码',
+            desc: '插入一对反引号，光标停在其中',
+            control: { type: 'toggle', key: 'insInlineCode' },
+          },
+          {
+            name: '高亮',
+            desc: '插入 == ==，光标停在中间',
+            control: { type: 'toggle', key: 'insHighlight' },
+          },
+          {
+            name: '笔记链接',
+            desc: '选一篇笔记，插入指向它的链接',
+            control: { type: 'toggle', key: 'insNote' },
+          },
+          {
+            name: '嵌入笔记',
+            desc: '选一篇笔记，把它的内容嵌入当前位置',
+            control: { type: 'toggle', key: 'insEmbedNote' },
+          },
+          {
+            name: '块引用',
+            desc: '先选笔记再选块，插入指向该块的链接',
+            control: { type: 'toggle', key: 'insBlockRef' },
+          },
+          {
+            name: '嵌入块',
+            desc: '先选笔记再选块，把该块内容嵌入当前位置',
+            control: { type: 'toggle', key: 'insBlockEmbed' },
+          },
         ],
       },
       ...this.donateGroups(),

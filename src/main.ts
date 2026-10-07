@@ -433,5 +433,10 @@ export {
   parseBlockColorValue,
 } from './block-color';
 export { BlockConverter } from './convert';
+export { buildColumnsMarkdown, planListColumns } from './convert';
+export type { ListColumnsPlan } from './convert';
 export { buildSlashItems, BlockInserter } from './slash-suggest';
+export { slashTrigger, filterSlashItems, isBlockedContext } from './slash-trigger';
+export { INSERT_SPECS } from './constants';
+export { resolveSnippet, enabledInsertIds, formatDateTime, INSERT_TOGGLE_KEY } from './insert-actions';
 export { scanBlockIds } from './picker';

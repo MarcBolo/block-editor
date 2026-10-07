@@ -1,15 +1,18 @@
 {
   "showHandle": true,
   "handleFollowsCursor": true,
+  "blockHoverHighlight": true,
+  "blockHoverHighlightColor": "#ffeb0f",
+  "blockHoverHighlightOpacity": 0.05,
   "slashCommands": true,
   "dragAutoScroll": true,
   "indentStep": 0,
   "livePreviewWidget": true,
-  "columnsGap": 4,
-  "columnsRadius": 12,
+  "columnsGap": 10,
+  "columnsRadius": 8,
   "columnsValign": "stretch",
   "columnsBorder": false,
-  "handleSize": 32,
-  "dragThreshold": 16,
-  "linkOpenMode": "split"
+  "handleSize": 20,
+  "dragThreshold": 4,
+  "linkOpenMode": "tab"
 }

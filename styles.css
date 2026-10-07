@@ -23,21 +23,29 @@
  *     主题覆盖后会影响插件外观（属预期内跟随主题），变量缺失时回退
  *     到浏览器默认，可能导致插件控件观感异常——排查时优先核对以上变量。
  *
- * ── 二、!important 策略（共 71 处）──────────────────────────
- * 【必须区——不可删】因脱离 .markdown-rendered 上下文、主题规则无法
- *   命中或必须压过主题默认样式的区域：
- *   1. callout 去 chrome（分栏外壳/源码视图 widget 外层 callout）：
- *      L467-470、L478-483、L504、L512-513、L524、L553-554、L571-576、L585-588、L594-599、L637、L650、L657-659、L671-675、L680。
- *   2. widget 渲染态快照兜底（.block-editor-col-content 内脱离阅读
- *      上下文的排版对齐）：代码块 L723-726、L731-734、复选框与列表负 margin 归零
- *      L751-752、L804-805、L810-811、L820-821、L838-839、widget 子栏圆角 L846-847。
- * 【可去区——保留但勿删错】编辑态/插件 UI 自身规则，压 Obsidian 控件
- *   默认样式或同文件内规则竞争：L139（拖拽光标）、L210-212、L217（编辑态
- *   容器边框）、L268-272、L278-281（编辑态 textarea 去默认边框/白底/outline/
- *   阴影）、L439（widget display:flex）。此区删除前需逐条验证视觉
- *   无回归，不建议批量移除。
- * 维护红线：新增规则禁止随意加 !important；必须区删除前需跑回归脚本
- * （block-color-spec.cjs / cm6-lineat-spec.cjs / 分栏相关 spec）。
+ * ── 二、!important 策略（共 64 处）──────────────────────────
+ * 保留必要性：插件 CSS 注入宿主应用，面对不可控的第三方主题 / snippet；选择器
+ *   特异性无法战胜 !important，且实测主题在状态选择器上的特异性也高于插件编辑
+ *   态选择器，故此类竞争只能由 !important 压制。保留区：
+ *   1. callout 去 chrome（分栏外壳 / 阅读模式子栏 / 源码视图 widget 外层）：
+ *      背景 / 边框 / 圆角 / 内外边距 / 阴影。
+ *   2. widget 渲染态快照（.block-editor-col-content）排版兜底：全局 margin /
+ *      padding 归零（L338-345，分栏内所有后代）、列表 / 复选框 / 代码块 /
+ *      ::marker 等与阅读模式对齐。
+ *   3. 编辑态 textarea 去默认表单外观：border / border-width / background-color /
+ *      outline / border-radius / box-shadow（主题的 textarea:focus / :is(...):focus
+ *      会盖过特化选择器，如 Baseline body.input-material textarea:focus=(0,2,2)、
+ *      Velocity :is(input,textarea,…):focus=(0,2,1)，故不能靠提高特异性替代）。
+ *   4. 压过同文件内保留规则者：.be-col-border、M4 默认边框。
+ *   5. 需压过核心 CSS 的 widget 布局：display: flex（核心
+ *      .markdown-source-view.mod-cm6 .cm-content > * 设 display:block）。
+ * 已移除（无需 !important）：仅命中插件私有 class、外部 CSS 不会命中的区域，
+ *   以及与本文件保留的归零规则完全重复（删除后级联结果不变）的规则：
+ *   - .block-editor-col-editor 的 border / border-width / border-radius；
+ *   - .block-editor-col-content 内 p / li / ul 的 margin-block / padding-block
+ *     归零与 .task-list-item-checkbox 的负 margin 归零（前者由 L338-345 兜底）。
+ * 维护红线：新增规则禁止随意加 !important；删除上述保留区前需在目标主题下
+ *   目视验证，并跑回归脚本（block-color-spec.cjs / cm6-lineat-spec.cjs / 分栏 spec）。
  * ============================================================ */
 
 .block-editor-handle {
@@ -72,6 +80,14 @@
 
 .block-editor-handle.is-dragging {
   opacity: 0.6;
+}
+
+/* 左侧留白连压缩后的手柄都放不下（罕见：极窄面板 + 大号手柄）：
+   手柄被压到最小尺寸仍可能与折叠图标有重叠，此时抬高层级并加底色，
+   保证手柄本身仍可点、且不会和图标糊成一团看不清边界。 */
+.block-editor-handle.is-squeezed {
+  z-index: 7;
+  background: var(--background-primary);
 }
 
 .block-editor-drag-ghost {
@@ -126,9 +142,17 @@
 .block-editor-drag-ghost[data-action='column-right']::before {
   content: '分栏 · 右';
 }
+/* 需求 A：拖块进分栏 —— 区分「插到新栏」与「复制到新栏（Alt）」 */
+.block-editor-drag-ghost[data-action='col-new']::before {
+  content: '新增一栏';
+}
+.block-editor-drag-ghost[data-action='col-new-copy']::before {
+  content: '复制到新栏（Alt）';
+}
 
 /* 分栏类动作：ghost 边框改虚线 accent，与移动的实线边框在形态上区分 */
-.block-editor-drag-ghost[data-action^='column'] {
+.block-editor-drag-ghost[data-action^='column'],
+.block-editor-drag-ghost[data-action^='col-'] {
   border-color: var(--interactive-accent);
   border-style: dashed;
 }
@@ -139,6 +163,7 @@
 }
 
 .block-editor-indicator {
+  display: none;
   position: absolute;
   height: 2px;
   background: var(--interactive-accent);
@@ -167,6 +192,7 @@
    颜色 / 透明度由 body 上的 --be-hover-color / --be-hover-opacity 驱动，
    fallback 保留旧版默认值，确保插件未加载时外观不变。 */
 .block-editor-hover-block {
+  display: none;
   position: absolute;
   background: var(--be-hover-color, var(--background-modifier-hover));
   opacity: var(--be-hover-opacity, 0.55);
@@ -225,8 +251,9 @@ body.block-editor-dragging .cm-content {
   content: '';
   position: absolute;
   left: 50%;
-  top: 4px;
-  bottom: 4px;
+  /* 竖线高度比分隔条整体缩短 30%：上下各缩进父高的 15%（随栏高自适应） */
+  top: 15%;
+  bottom: 15%;
   width: 2px;
   transform: translateX(-50%);
   border-radius: 1px;
@@ -261,17 +288,34 @@ body.block-editor-dragging .cm-content {
   align-self: var(--be-col-valign, stretch);
   padding: 4px 6px;
   background: transparent;
-  border: none !important; /* 容器不描边，防主题默认边框 */
-  border-width: 0 !important;
-  border-radius: 0 !important; /* 容器直角：去主题默认圆角，视觉更简洁 */
+  border: none; /* 容器不描边，防主题默认边框 */
+  border-width: 0;
+  border-radius: 0; /* 容器直角：去主题默认圆角，视觉更简洁 */
 }
 
-/* H1 border 参数：widget 带该 class 时给编辑态栏描边（覆盖上方 border:none） */
-.block-editor-columns-widget.block-editor-columns-border .block-editor-col-editor {
-  border: 1px solid var(--background-modifier-border) !important;
+/* 实时预览 widget 子栏描边：
+   - 默认读设置变量 --be-col-border（由 applyColumnsCssVars 写到 body，见 settings.ts），
+     与阅读模式子栏一致；
+   - 分栏外壳写了 `border` 参数时，插件给对应 row 加 .block-editor-columns-border
+     （columns-preview.ts），用更高特异性强制 1px 描边，覆盖默认值与上方 border:none。 */
+body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
+  border-style: solid;
+  border-color: var(--background-modifier-border);
+  border-width: var(--be-col-border, 0px);
 }
 
-/* 拖拽排序手柄 */
+body.be-columns-live-on .block-editor-columns-row.block-editor-columns-border .block-editor-col-editor {
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* 拖拽排序手柄（⠿）
+   命中区必须够大：grip 只有一个 12px 字形，早期版本无 padding，实际可点区域
+   仅约 13×12px，实测「按住图标拖不动」（点不中 / 按住时目标已偏移）。
+   现在用 padding 把命中区撑到整栏宽 × 20px，并让字形仍居中显示：
+     - width 100% + text-align center：横向覆盖整栏，无需精确对准字形
+     - padding 4px 0：纵向留出可点余量（> 8px 双击阈值）
+     - margin-bottom 2px 保持与内容的间距
+   cursor: grab 反馈可拖；-webkit-user-select 防止拖拽时选中文字。 */
 .block-editor-col-grip {
   cursor: grab;
   color: var(--text-faint);
@@ -280,17 +324,73 @@ body.block-editor-dragging .cm-content {
   line-height: 1;
   letter-spacing: 3px;
   user-select: none;
+  -webkit-user-select: none;
+  /* 扩大命中区：横向铺满整栏、纵向留 4px 余量 */
+  width: 100%;
+  padding: 4px 0;
   margin-bottom: 2px;
+  /* 负 margin 抵消 padding，保证栏内总高度不因命中区而变多 */
+  margin-top: -4px;
+  border-radius: 3px;
+  /* 悬停时给出可见反馈，暗示"这里可以拖" */
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.block-editor-col-grip:hover {
+  color: var(--text-muted);
+  background: var(--background-modifier-hover);
 }
 
 .block-editor-col-grip:active {
   cursor: grabbing;
+  color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
 }
 
 /* 拖拽排序时的目标高亮 */
 .block-editor-col-editor.block-editor-col-drop {
   outline: 2px dashed var(--interactive-accent);
   outline-offset: -2px;
+}
+
+/* 被抓起的源栏：半透明 + 虚线描边。
+   没有它时，按住 ⠿ 拖动后界面毫无变化，用户无法判断「拖拽是否已开始」，
+   会把「落点判定失败」误读成「手柄拖不动」。 */
+.block-editor-col-editor.block-editor-col-dragging {
+  opacity: 0.45;
+  outline: 2px dashed var(--text-faint);
+  outline-offset: -2px;
+}
+
+/* 需求 B「拖出分栏」的落点插入线。
+   必须显式 display:block —— .block-editor-indicator 的默认样式是 display:none
+   （drag.ts 靠 setCssStyles 显隐它自己的那个实例），新建的同名元素若不覆盖
+   display 会是一条永远看不见的线。 */
+.block-editor-indicator.block-editor-col-outline {
+  display: block;
+  height: 2px;
+  background: var(--interactive-accent);
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* 斜杠命令弹窗：条目多（转换类 30+ 项），单列会把弹窗拉得很长 → 3 列网格。
+   容器类由 renderSuggestion 打在 .suggestion（条目元素上溯一层）上。 */
+.block-editor-slash-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+}
+
+.block-editor-slash-grid .suggest-item {
+  padding: 5px 4px;
+  text-align: center;
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 栏内容：默认保证最小可点区域（防空栏/小内容高度塌陷无法双击）；
@@ -347,6 +447,10 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content.b
      截成约 3 行，整块高度错误地以最矮的栏为准。 */
   flex: 0 0 auto;
   resize: vertical;
+  /* 以下 6 条须 !important：主题对 textarea:focus 等状态选择器的特异性高于本
+     选择器（如 Baseline body.input-material textarea:focus=(0,2,2)、Velocity
+     :is(input,textarea,…):focus=(0,2,1)），编辑栏聚焦时会被主题表单样式覆盖，
+     故不能靠提高特异性替代。 */
   border: none !important; /* 边框线宽度归 0，防 Obsidian 主题 textarea 默认边框 */
   border-width: 0 !important;
   background: transparent;
@@ -531,10 +635,15 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content.b
   flex-wrap: wrap;
 }
 
-/* row 必须占满 widget 可用宽：widget 是 flex 容器时 row 是 flex item，
-   默认 flex: 0 1 auto 会收缩为内容宽导致右侧留白（阅读模式 callout-content 占满所以正常） */
+/* row 必须占满 widget 可用宽，且每行独占一整行：
+   - 占满宽：widget 是 flex 容器时 row 是 flex item，默认 flex: 0 1 auto 会收缩为
+     内容宽导致右侧留白（阅读模式 callout-content 占满所以正常）；
+   - 独占一行：basis 取 100%（而非 0）——basis 0 + min-width 0 会让多行假设主轴
+     尺寸为 0，flex-wrap 永不触发，多行被并排放在同一行（「新增的行没有另起一行」）；
+     basis 100% 时每行都超过容器宽 → 强制换行，多行纵向堆叠。
+     语义与原生渲染路径的 colrow（flex: 1 0 100%，见 H2 段落）保持一致。 */
 .block-editor-columns-widget > .block-editor-columns-row {
-  flex: 1 1 0;
+  flex: 1 1 100%;
   min-width: 0;
   /* 栏的垂直对齐由 row 的 align-items 决定（栏是 row 的 flex item）；
      消费 --be-col-valign，使「顶部/居中/底部对齐」在实时预览下生效
@@ -768,6 +877,7 @@ body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content >
 
 /* ===== H4 拖拽贴边快速分栏：贴边指示竖线 ===== */
 .block-editor-edge-line {
+  display: none;
   position: absolute;
   width: 3px;
   border-radius: 2px;
@@ -781,6 +891,7 @@ body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content >
 /* 四向落区·贴边分栏：目标块整体描边（虚线 accent），提示「此块将与拖动块合成分栏」；
    与移动时的横向插入线（2px 实线）在形态上明确区分，避免两种落点模式混淆 */
 .block-editor-edge-box {
+  display: none;
   position: absolute;
   box-sizing: border-box;
   border: 1px dashed var(--interactive-accent);
@@ -790,6 +901,26 @@ body.be-columns-live-on .callout[data-callout='multi-column'] .callout-content >
   pointer-events: none;
   /* 挂在 .cm-editor 内（overflow:hidden），z-index 只需高于编辑器正文 */
   z-index: 5;
+}
+
+/* ===== 需求 A：拖块进分栏新增一栏 —— 插入位竖条 =====
+   与 .block-editor-edge-line（贴边合成分栏的竖线）刻意区分：
+   - 形态：竖条无光晕、加宽端点，与 edge-line 的发光细线一眼可辨
+   - 语义：edge-line = 「与目标块合成分栏」；本条 = 「新栏插在这里」
+   命中栏间插入带时，参照栏描边（edge-box）也会亮起，两者叠加表示
+   「在两栏之间插入一栏」。 */
+.block-editor-col-slot {
+  display: none;
+  position: absolute;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--interactive-accent);
+  pointer-events: none;
+  /* 端点小圆头，暗示"这里可以插入"而非"这里是一条边" */
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+  /* 高于 edge-box(5) / edge-line(6)，避免被参照栏描边盖住 */
+  z-index: 7;
 }
 
 /* ===== H5 任意块颜色标记：阅读模式容器标记 ===== */
@@ -849,8 +980,8 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content p
    选择器只命中 widget 渲染态 checkbox，不影响编辑态 textarea，不影响普通列表。 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul > li.task-list-item > p > .task-list-item-checkbox,
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul > li.task-list-item > .task-list-item-checkbox {
-  margin-inline-start: 0 !important;
-  margin-inline-end: 0.6em !important;
+  margin-inline-start: 0;
+  margin-inline-end: 0.6em;
   position: relative;
   top: 0.2em;
 }
@@ -863,9 +994,9 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content u
    及潜在 padding-block 造成的列表前后空隙。 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ul,
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content ol {
-  margin-block-start: 0 !important;
-  margin-block-end: 0 !important;
-  padding-block: 0 !important;
+  margin-block-start: 0;
+  margin-block-end: 0;
+  padding-block: 0;
   padding-inline-start: 1.5em !important;
   list-style-position: outside !important;
 }
@@ -913,8 +1044,8 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content h
 }
 
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content p {
-  margin-block-start: 0 !important;
-  margin-block-end: 0 !important;
+  margin-block-start: 0;
+  margin-block-end: 0;
 }
 
 /* 任务列表项不显示原生圆点（复选框替代） */
@@ -931,18 +1062,18 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content l
    垂直 margin 归零。仅命中 widget 渲染态列表项，不影响编辑态 textarea、
    不影响列表外段落间距，待办项行距与阅读模式一致。 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li {
-  margin-block-start: 0 !important;
-  margin-block-end: 0 !important;
-  padding-block-start: 0 !important;
-  padding-block-end: 0 !important;
+  margin-block-start: 0;
+  margin-block-end: 0;
+  padding-block-start: 0;
+  padding-block-end: 0;
 }
 
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li > p,
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content li p {
-  margin-block-start: 0 !important;
-  margin-block-end: 0 !important;
-  padding-block-start: 0 !important;
-  padding-block-end: 0 !important;
+  margin-block-start: 0;
+  margin-block-end: 0;
+  padding-block-start: 0;
+  padding-block-end: 0;
 }
 
 /* 任意层级兜底：Obsidian 版本间任务列表渲染层级有差异（可能 li 与 p 之间插入
@@ -951,10 +1082,10 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content l
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item,
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item > p,
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item p {
-  margin-block-start: 0 !important;
-  margin-block-end: 0 !important;
-  padding-block-start: 0 !important;
-  padding-block-end: 0 !important;
+  margin-block-start: 0;
+  margin-block-end: 0;
+  padding-block-start: 0;
+  padding-block-end: 0;
 }
 
 /* ===== 分栏：widget 内 mark 高亮与阅读模式对齐 ===== */
@@ -990,16 +1121,16 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content p
    命中 .block-editor-col-content 内任意层级的 checkbox，与上方 li 结构规则
    互补，保证负 margin 归零、行内流式排列 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-content .task-list-item-checkbox {
-  margin-inline-start: 0 !important;
-  margin-inline-end: 0.6em !important;
+  margin-inline-start: 0;
+  margin-inline-end: 0.6em;
 }
 
 /* ===== 分栏：widget 子栏圆角与阅读模式对齐 ===== */
 /* 阅读模式子栏 callout 有 var(--be-col-radius) 圆角（默认 8px），而 widget 子栏
-   .block-editor-col-editor 被上方全局规则强制直角（border-radius: 0 !important），
-   导致实时预览分栏直角、阅读模式分栏圆角。补一条同权重 !important 覆盖，仅限 widget。 */
+   .block-editor-col-editor 被上方全局规则强制直角（border-radius: 0），
+   导致实时预览分栏直角、阅读模式分栏圆角。补一条更高特异性的覆盖，仅限 widget。 */
 body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
-  border-radius: var(--be-col-radius, 8px) !important;
+  border-radius: var(--be-col-radius, 8px);
 }
 
 /* ===== 分栏：widget 内代码块自动换行防截断 ===== */
@@ -1043,6 +1174,131 @@ body.be-columns-live-on .block-editor-columns-widget .block-editor-col-editor {
 body.be-columns-live-on.theme-dark .block-editor-columns-widget .block-editor-col-editor {
   --col-bg: var(--col-bg-dark, var(--col-bg-light, transparent));
   --col-bg-text: var(--col-bg-text-dark, var(--col-bg-text-light, var(--text-normal)));
+}
+
+/* ===== 设置页：支持作者（打赏收款码，可折叠） ===== */
+/* 由 settings.ts donateGroups() 生成：框架为 render 行预留的 info/control
+   容器不参与布局，整行交给 <details> 接管。 */
+.be-donate-row {
+  display: block;
+}
+
+.be-donate-row > .setting-item-info,
+.be-donate-row > .setting-item-control {
+  display: none;
+}
+
+.be-donate {
+  width: 100%;
+}
+
+.be-donate-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 12px 0;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small, 13px);
+  font-weight: 500;
+  user-select: none;
+}
+
+.be-donate-summary::-webkit-details-marker {
+  display: none;
+}
+
+.be-donate-chevron {
+  display: inline-flex;
+  color: var(--text-faint);
+  transition: transform 120ms ease;
+}
+
+.be-donate-chevron .svg-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.be-donate[open] .be-donate-chevron {
+  transform: rotate(90deg);
+}
+
+.be-donate-hint {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller, 12px);
+  font-weight: 400;
+}
+
+.be-donate-body {
+  padding: 0 0 16px;
+}
+
+.be-donate-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.be-donate-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  /* 窄面板下换行而不是被压缩，避免二维码被裁切 */
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+/* 二维码底色固定为白，保证深色主题下仍可被正常扫描；点击可放大 */
+.be-donate-code img {
+  display: block;
+  width: 180px;
+  height: 180px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.be-donate-code img:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.be-donate-code figcaption {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+/* ===== 收款码放大预览弹窗 ===== */
+.modal.be-image-preview-modal {
+  width: auto;
+  max-width: 90vw;
+}
+
+.be-image-preview-modal .modal-content {
+  padding: 0;
+}
+
+.be-image-preview-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.be-image-preview {
+  display: block;
+  width: min(70vh, 90vw, 640px);
+  height: auto;
+  border-radius: 8px;
+  background: #fff;
 }
 
 /* ===== 块颜色标记：双主题（浅色/深色自动切换） ===== */
@@ -1150,4 +1406,14 @@ body.theme-dark [data-block-color] {
 .block-editor-col-picker-dark-reset:hover {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
+}
+
+/* 分栏诊断弹窗：JSON 文本展示样式（commands.ts ColumnsDiagModal） */
+.block-editor-diag-pre {
+  font-size: 12px;
+  white-space: pre-wrap;
+  user-select: text;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
 }

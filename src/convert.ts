@@ -142,6 +142,120 @@ export function buildColumnsMarkdown(
   return out.join('\n');
 }
 
+/** 嵌套列表转分栏的切分结果（纯文本计算，便于离线断言） */
+export interface ListColumnsPlan {
+  /** 每栏内容（已剥公共基础缩进），元素即栏内多行文本 */
+  segments: string[];
+  /**
+   * 分栏之外的引导段（已剥公共缩进，通常是 level=1 时的父项行）。
+   * 父项是统领所有子项的引入语，**不应塞进某一栏**——那会在视觉上暗示
+   * 它只属于那一栏。调用方应把它写在分栏之前。
+   */
+  lead?: string;
+  /** 切分结果为何不可用（供菜单提示；`segments` 为空时才有值） */
+  reason?: 'no-list' | 'need-two' | 'multi-parent';
+}
+
+/** 列表项行判定：`缩进 + 列表符号 + 空格`。数字/点/横线/加号/星号都算。 */
+const LIST_ITEM_RE = /^(\s*)(?:[-*+]|\d+[.)])\s+/;
+
+/** 取行缩进宽度 */
+function indentWidth(line: string): number {
+  return (line.match(/^(\s*)/) || ['', ''])[1].length;
+}
+
+/**
+ * 把嵌套列表按缩进层级切成多栏（`wrapListToColumns` 的纯计算部分）。
+ *
+ * `level` 语义（切点 = 缩进恰等于该层的列表项）：
+ * - `0`「按父项」：最浅层每个列表项各起一栏，其下所有后代行跟随该栏。
+ * - `1`「按子项」：**要求整段只有 1 个父项**，其每个直接子项各起一栏，
+ *   更深的子行跟随所属子项；父项行**不并入任何一栏**，而是作为
+ *   `lead` 引导段由调用方写在分栏之前。多父项时返回 `multi-parent`
+ *   —— 那种形态的语义本就歧义，宁可不转换。
+ *
+ * 与 `columnsSegmentCount` 同一语义：**代码围栏内的行不参与切点判定**，
+ * 避免列表项内嵌代码（缩进往往更深）被误判为更深层级而切错栏。
+ */
+export function planListColumns(
+  lines: string[],
+  level = 0
+): ListColumnsPlan | null {
+  const isItem = (l: string): boolean => LIST_ITEM_RE.test(l);
+
+  // 收集列表项下标与出现过的缩进层级
+  const itemIdx: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (isItem(lines[i])) itemIdx.push(i);
+  if (!itemIdx.length) return { segments: [], reason: 'no-list' };
+
+  const indents: number[] = [];
+  for (const i of itemIdx) {
+    const n = indentWidth(lines[i]);
+    if (!indents.includes(n)) indents.push(n);
+  }
+  indents.sort((a, b) => a - b);
+  const cutIndent = indents[Math.min(level, indents.length - 1)];
+  const baseIndent = indents[0];
+
+  // level=1 要求单父项：多父项时语义歧义，拒绝转换（避免默默丢内容）
+  let head: string[] = [];
+  if (level > 0 && cutIndent !== baseIndent) {
+    const parents = itemIdx.filter((i) => indentWidth(lines[i]) === baseIndent);
+    if (parents.length > 1) return { segments: [], reason: 'multi-parent' };
+    // 父项行到第一个切点之间的所有行（含更深层）作为分栏前的引导段
+    const firstCut = itemIdx.find((i) => indentWidth(lines[i]) === cutIndent);
+    for (let i = 0; i < (firstCut ?? lines.length); i++) {
+      if (lines[i].trim() !== '') head.push(lines[i]);
+    }
+  }
+
+  // 按切点分段：命中切点开新栏，其余行跟随当前栏
+  const groups: string[][] = [];
+  let cur: string[] | null = null;
+  let fenceCh: string | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceCh !== null) {
+      const m = line.match(/^\s*(`{3,}|~{3,})/);
+      if (m && m[1][0] === fenceCh) fenceCh = null;
+      if (cur) cur.push(line);
+      continue;
+    }
+    const f = line.match(/^\s*(`{3,}|~{3,})/);
+    if (f) {
+      fenceCh = f[1][0];
+      if (cur) cur.push(line);
+      continue;
+    }
+    // 切点：缩进恰等于切分层级的列表项。首个切点开第一栏，之后每个切点开新栏
+    if (isItem(line) && indentWidth(line) === cutIndent) {
+      groups.push((cur = []));
+    }
+    if (!cur) continue; // 切点之前的行（父项标题区）已单独收集
+    cur.push(line);
+  }
+
+  if (groups.length < 2) return { segments: [], reason: 'need-two' };
+
+  // 剥掉公共基础缩进，栏内列表从顶格开始（相对层级完整保留）
+  const dedent = (s: string): string =>
+    s
+      .split('\n')
+      .map((l) => {
+        if (l.trim() === '') return '';
+        const n = indentWidth(l);
+        return ' '.repeat(Math.max(n - cutIndent, 0)) + l.slice(n);
+      })
+      .join('\n')
+      .replace(/\s+$/, '');
+
+  const segments = groups.map((g) => dedent(g.join('\n')));
+  // 父项行作为分栏前的引导段独立返回，**不并入任何一栏**
+  const lead = head.length ? dedent(head.join('\n')) : '';
+  return lead ? { segments, lead } : { segments };
+}
+
 /** 块类型识别与「转换为」 */
 export class BlockConverter {
   constructor(private ctx: BlockEditorPlugin) {}
@@ -500,6 +614,104 @@ export class BlockConverter {
       text,
       { line: start, ch: 0 },
       { line: end, ch: editor.getLine(end).length }
+    );
+    this.ctx.handle.hideHandle();
+  }
+
+  /**
+   * 列表转分栏的作用范围：多选时用选区，否则把光标所在的**整个同级列表**
+   * 纳入范围（向上找同缩进的列表项起点、向下并入其所有子项）。
+   *
+   * 不这样做的话，光标停在单个子项上时范围只有一行 → 切不开栏，菜单项永远置灰。
+   */
+  private listColumnRange(block: BlockContext): { start: number; end: number } {
+    const sel = this.ctx.selection.selection;
+    if (sel && sel.editor === block.editor && this.ctx.selection.isInSelection(block) && sel.ranges.length > 1) {
+      const rs = sel.ranges.slice().sort((a, b) => a.start - b.start);
+      return { start: rs[0].start, end: rs[rs.length - 1].end };
+    }
+    const editor = block.editor;
+    // 向上：越过所有更浅的祖先列表项，找到该列表的顶层项作为起点。
+    // 光标停在任意深度的子项上时，范围都覆盖「整个列表」而不是单个子项。
+    let start = block.start;
+    let base = indentWidth(editor.getLine(block.start));
+    for (let i = block.start - 1; i >= 0; i--) {
+      const line = editor.getLine(i);
+      const m = LIST_ITEM_RE.exec(line);
+      if (m) {
+        const ind = m[1].length;
+        if (ind < base) {
+          // 更浅的祖先列表项：它就是本列表的顶层，纳入范围并以其缩进继续向上
+          start = i;
+          base = ind;
+        } else if (ind === base) {
+          // 同级项：位于顶层，继续向上找该列表真正的起点
+          start = i;
+        }
+        // ind > base：更深的子项，属于当前项，不影响起点
+      } else if (line.trim() === '') break;
+      else if (indentWidth(line) >= base) continue; // 缩进更深的续行
+      else break; // 顶格正文：列表到此为止
+    }
+    return { start, end: block.end };
+  }
+
+  /**
+   * 嵌套列表可切出的栏数（供菜单置灰判断）。
+   * `by='parent'` 按最浅层列表项数，`by='child'` 按一层子项数。
+   * 不足 2 栏返回 0，表示不可转换。
+   */
+  listColumnCount(block: BlockContext, by: 'parent' | 'child' = 'parent'): number {
+    const r = this.listColumnRange(block);
+    const plan = planListColumns(
+      getLines(block.editor, r.start, r.end),
+      by === 'parent' ? 0 : 1
+    );
+    return plan ? plan.segments.length : 0;
+  }
+
+  /**
+   * 嵌套列表转分栏：按父项（`parent`）或按一层子项（`child`）各切一栏，
+   * 产物复用 `buildColumnsMarkdown`，与「组合为分栏」同样前后贴空行（单步撤销）。
+   *
+   * 已有分栏内不允许再套一层；栏数不足 2 时提示并终止。
+   */
+  wrapListToColumns(block: BlockContext, by: 'parent' | 'child' = 'parent'): void {
+    const editor = block.editor;
+    if (this.isColumnsBlock(editor, block) || this.insideColumns(editor, block)) {
+      new Notice('分栏内部不能再套分栏');
+      return;
+    }
+    const r = this.listColumnRange(block);
+
+    const plan = planListColumns(
+      getLines(editor, r.start, r.end),
+      by === 'parent' ? 0 : 1
+    );
+    if (!plan || plan.segments.length < 2) {
+      new Notice(
+        plan?.reason === 'multi-parent'
+          ? '按子项转为分栏要求整段只有一个父项'
+          : by === 'parent'
+            ? '按父项转为分栏至少需要两个列表项'
+            : '按子项转为分栏至少需要两个同级子项'
+      );
+      return;
+    }
+
+    const out = buildColumnsMarkdown(plan.segments);
+    const total = editor.lineCount();
+    const prefix = r.start > 0 && editor.getLine(r.start - 1).trim() !== '' ? [''] : [];
+    const suffix = r.end < total - 1 && editor.getLine(r.end + 1).trim() !== '' ? [''] : [];
+    // 引导段（level=1 时的父项）写在分栏**之前**并与分栏间留空行：
+    // 它统领所有子项，塞进某一栏会在视觉上误导归属，也会让首栏明显更重。
+    const lead = plan.lead ? [...plan.lead.split('\n'), ''] : [];
+    const text = [...prefix, ...lead, ...out.split('\n'), ...suffix].join('\n');
+
+    editor.replaceRange(
+      text,
+      { line: r.start, ch: 0 },
+      { line: r.end, ch: editor.getLine(r.end).length }
     );
     this.ctx.handle.hideHandle();
   }

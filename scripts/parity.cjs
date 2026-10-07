@@ -660,10 +660,16 @@ const FIXTURE_A = [
   const items = newMod.buildSlashItems('');
   // 转换项在前、插入项在后
   check('v07.slash.turnFirst', items[0].kind, 'turn');
+  // 插入类已从 4 项扩到 14 项（媒体 4 + 日期时间 3 + 行内标记 3 + 链接块引用 4）
   check(
     'v07.slash.insertIds',
     items.filter((i) => i.kind === 'insert').map((i) => i.id),
-    ['image', 'audio', 'video', 'pdf']
+    [
+      'image', 'audio', 'video', 'pdf',
+      'date', 'time', 'datetime',
+      'math', 'inlinecode', 'highlight',
+      'note', 'embednote', 'blockref', 'blockembed',
+    ]
   );
   check(
     'v07.slash.hasTurnParagraph',
@@ -673,6 +679,28 @@ const FIXTURE_A = [
   // 查询命中：中文标题与英文 id 都要能搜到
   check('v07.slash.queryImage', newMod.buildSlashItems('图片')[0]?.id, 'image');
   check('v07.slash.queryImg', newMod.buildSlashItems('img')[0]?.id, 'image');
+  check('v07.slash.queryDate', newMod.buildSlashItems('日期')[0]?.id, 'date');
+  check('v07.slash.queryMath', newMod.buildSlashItems('公式')[0]?.id, 'math');
+
+  // 行内触发（非行首 /）：只给插入类，绝不出现转换类
+  check(
+    'v07.slash.inlineOnly',
+    newMod.buildSlashItems('', true).every((i) => i.kind === 'insert'),
+    true
+  );
+  check(
+    'v07.slash.inlineQuery', // 曾在这里泄漏转换类：非空查询从未过滤的 items 里排序
+    newMod.buildSlashItems('图', true).every((i) => i.kind === 'insert'),
+    true
+  );
+  check('v07.slash.blockStillTurn', newMod.buildSlashItems('')[0].kind, 'turn');
+  // 触发判定：非行首一律行内（只给附件），路径形态豁免
+  check('v07.slash.triggerInline', newMod.slashTrigger('文字/图'), { ch: 2, query: '图', inline: true });
+  check('v07.slash.triggerSpace', newMod.slashTrigger('sdfs /'), { ch: 5, query: '', inline: true });
+  check('v07.slash.triggerBlock', newMod.slashTrigger('/图'), { ch: 0, query: '图', inline: false });
+  check('v07.slash.triggerListMarker', newMod.slashTrigger('- /图'), { ch: 2, query: '图', inline: false });
+  check('v07.slash.triggerPath', newMod.slashTrigger('C:/Users'), null);
+  check('v07.slash.triggerInCode', newMod.slashTrigger('`代码/图'), null);
 }
 
 // 14) v0.7 块 ID 扫描 自检

@@ -1,4 +1,4 @@
-import type { InsertActionId, TurnIntoItem } from './types';
+import type { InsertActionId, InsertSpec, TurnIntoItem } from './types';
 
 export const HANDLE_W = 20;
 export const HANDLE_H = 20;
@@ -19,7 +19,6 @@ export const TURN_INTO: TurnIntoItem[] = [
   ['callout', 'Callout'],
   ['toggle', '折叠块'],
   ['code', '代码块'],
-  ['mermaid', 'Mermaid 图'],
   ['math', '数学公式'],
   ['table', '表格'],
   ['divider', '分割线'],
@@ -109,7 +108,21 @@ export const INSERT_ACTIONS: [InsertActionId, string][] = [
   ['audio', '音频'],
   ['video', '视频'],
   ['pdf', 'PDF'],
+  ['date', '日期'],
+  ['time', '时间'],
+  ['datetime', '日期时间'],
+  ['math', '行内公式'],
+  ['inlinecode', '行内代码'],
+  ['highlight', '高亮'],
+  ['note', '笔记链接'],
+  ['embednote', '嵌入笔记'],
+  ['blockref', '块引用'],
+  ['blockembed', '嵌入块'],
 ];
+
+/** 日期 / 时间格式默认值（token 说明见 insert-actions.ts 的 formatDateTime） */
+export const DEFAULT_DATE_FORMAT = 'YYYY-MM-DD';
+export const DEFAULT_TIME_FORMAT = 'HH:mm';
 
 /** 媒体选择器的扩展名白名单（小写、不含点） */
 export const MEDIA_EXTS: Record<'image' | 'audio' | 'video' | 'pdf', string[]> = {
@@ -117,4 +130,26 @@ export const MEDIA_EXTS: Record<'image' | 'audio' | 'video' | 'pdf', string[]> =
   audio: ['mp3', 'wav', 'm4a', 'ogg', 'flac'],
   video: ['mp4', 'webm', 'mov', 'mkv', 'avi'],
   pdf: ['pdf'],
+};
+
+/**
+ * 各插入动作怎么执行（BlockInserter 按 kind 分派）。与 INSERT_ACTIONS 一一对应。
+ * 必须排在 MEDIA_EXTS 之后：对象字面量在模块求值时就会读取它。
+ */
+export const INSERT_SPECS: Record<InsertActionId, InsertSpec> = {
+  image: { kind: 'pick', exts: MEDIA_EXTS.image },
+  audio: { kind: 'pick', exts: MEDIA_EXTS.audio },
+  video: { kind: 'pick', exts: MEDIA_EXTS.video },
+  pdf: { kind: 'pick', exts: MEDIA_EXTS.pdf },
+  date: { kind: 'dynamic', dyn: 'date' },
+  time: { kind: 'dynamic', dyn: 'time' },
+  datetime: { kind: 'dynamic', dyn: 'datetime' },
+  // 光标落在两个标记中间（caret = 1 或 2），否则插完还得手动往回挪
+  math: { kind: 'snippet', text: '$$', caret: 1 },
+  inlinecode: { kind: 'snippet', text: '``', caret: 1 },
+  highlight: { kind: 'snippet', text: '====', caret: 2 },
+  note: { kind: 'note', embed: false },
+  embednote: { kind: 'note', embed: true },
+  blockref: { kind: 'blockref', embed: false },
+  blockembed: { kind: 'blockref', embed: true },
 };

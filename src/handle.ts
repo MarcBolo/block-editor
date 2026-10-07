@@ -1,11 +1,14 @@
 import type { Editor } from 'obsidian';
-import type { BlockContext, BlockRange } from './types';
+import type { BlockContext, BlockRange, CMView } from './types';
 import type BlockEditorPlugin from './main';
 import { HANDLE_W } from './constants';
 import { getCM, getEditorFromContent } from './util';
+import { computeHandleLeft } from './handle-layout';
 
 /** Notion 式块手柄：悬停显示、光标跟随、拖拽入口 */
 export class HandleController {
+  /** 一次性诊断开关：只打第一条，避免悬停时刷屏 */
+  private static dodgeLogged = false;
   private handleEl: HTMLElement | null = null;
   private highlightEl: HTMLElement | null = null;
   private hideTimer: number | null = null;
@@ -144,15 +147,75 @@ export class HandleController {
     const lineH = coords.bottom - coords.top || 20;
     // M4：手柄尺寸取设置值（缺省回退常量 20），与 styles.css 的 --be-handle-size 保持一致
     const handleSize = this.ctx.settings.handleSize || HANDLE_W;
-    const top = coords.top - editorRect.top + (lineH - handleSize) / 2;
+
+    const foldLeft = this.findFoldIndicatorLeft(cm, line.from);
+    // 实时预览下，列表 / 标题行首左侧还画着 Obsidian 的折叠图标：
+    // 手柄必须排在图标左边，否则两者叠在一起（图标被遮住就点不到折叠）。
+    // 折叠图标只在有子项时出现，故按行实时量测，量不到就退回行首左侧。
+    const layout = computeHandleLeft({
+      lineLeft: coords.left,
+      foldLeft,
+      editorLeft: editorRect.left,
+      editorWidth: editorRect.width,
+      handleSize,
+    });
+
+    // 一次性诊断：确认避让是否生效（量不到折叠图标时 foldLeft 为 null）
+    if (!HandleController.dodgeLogged) {
+      HandleController.dodgeLogged = true;
+      console.log('[block-editor] handle-dodge:', {
+        type: block.type,
+        lineLeft: Math.round(coords.left),
+        foldLeft: foldLeft == null ? null : Math.round(foldLeft),
+        left: Math.round(layout.left),
+        size: layout.size,
+        squeezed: layout.squeezed,
+      });
+    }
+
+    const top = coords.top - editorRect.top + (lineH - layout.size) / 2;
 
     if (this.handleEl) {
       if (this.handleEl.parentElement !== editorDom) editorDom.appendChild(this.handleEl);
       this.handleEl.setCssStyles({ position: 'absolute', display: 'flex' });
       this.handleEl.style.top = top + 'px';
-      this.handleEl.style.left = coords.left - editorRect.left - handleSize - 6 + 'px';
+      this.handleEl.style.left = layout.left + 'px';
+      // 左侧留白不够时按可用宽度压缩手柄（而不是让它压回折叠图标上）。
+      // 有富余时 layout.size === handleSize，与 CSS 变量 --be-handle-size 同值。
+      this.handleEl.style.width = layout.size + 'px';
+      this.handleEl.style.height = layout.size + 'px';
+      this.handleEl.classList.toggle('is-squeezed', layout.squeezed);
     }
     this.showHighlight(editor, block);
+  }
+
+  /**
+   * 取该行折叠图标（`.list-collapse-indicator` / `.collapse-indicator`）左缘的视口 x。
+   * 量不到（源码模式无图标、图标未渲染、隐藏元素 rect 全 0）一律返回 null，
+   * 由 computeHandleLeft 退回「贴行首左侧」的旧位置。
+   */
+  private findFoldIndicatorLeft(cm: CMView, pos: number): number | null {
+    try {
+      const at = cm.domAtPos(pos);
+      let node: Node | null = at.node;
+      let lineEl: HTMLElement | null = null;
+      while (node) {
+        if (node instanceof HTMLElement && node.classList.contains('cm-line')) {
+          lineEl = node;
+          break;
+        }
+        node = node.parentNode;
+      }
+      if (!lineEl) return null;
+      const ind = lineEl.querySelector('.list-collapse-indicator, .collapse-indicator');
+      if (!(ind instanceof HTMLElement)) return null;
+      const r = ind.getBoundingClientRect();
+      // 隐藏元素（display:none）宽高为 0：不可当成有效量测，否则手柄会贴左缘
+      if (r.width <= 0 || r.height <= 0) return null;
+      return r.left;
+    } catch {
+      return null;
+    }
   }
 
   setDragging(on: boolean): void {

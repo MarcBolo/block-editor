@@ -3,6 +3,38 @@ import type { Editor } from 'obsidian';
 import type { BlockContext, BlockRange } from './types';
 import type BlockEditorPlugin from './main';
 import { getCM, getIndent, getLines, keepViewport, shiftIndent } from './util';
+import { renumberOrdered, collectLayerStarts, layerKeyOf } from './list-number';
+
+/** 列表标记（序号上限 9 位，与 CommonMark 一致） */
+const LIST_MARK_RE = /^[\t ]*(?:>[\t ]*)*(?:[-*+]|\d{1,9}[.)])[\t ]+/;
+
+/**
+ * 把 [from, to] 向外扩到「列表段」边界 —— 同层级 key 的连续列表项全纳入。
+ *
+ * 必须外扩的原因：跨列表移动时，落点之后属于目标列表的项在原 span 之外，
+ * 不扩进来它们的序号修不到（会在中间插出一个断号）。
+ *
+ * 起始号不在这里定 —— 由 `collectLayerStarts(搬运前的 span)` 负责，
+ * 本函数只负责确定「哪些行属于同一个列表」。
+ */
+function expandToListSpan(editor: Editor, from: number, to: number): { from: number; to: number } {
+  const keyOf = (i: number) => layerKeyOf(editor.getLine(i));
+  const isItem = (i: number) => LIST_MARK_RE.test(editor.getLine(i));
+
+  const anchorKey = keyOf(from);
+  let lo = from;
+  let hi = to;
+
+  for (let i = from; i >= 0; i--) {
+    if (!isItem(i) || keyOf(i) !== anchorKey) break;
+    lo = i;
+  }
+  for (let i = to + 1; i < editor.lineCount(); i++) {
+    if (!isItem(i) || keyOf(i) !== anchorKey) break;
+    hi = i;
+  }
+  return { from: lo, to: hi };
+}
 
 /** 块操作：移动、删除、插入、缩进、复制内容、创建副本与跨文档搬运 */
 export class BlockOps {
@@ -22,8 +54,14 @@ export class BlockOps {
     const total = editor.lineCount();
     const insertAt = Math.min(Math.max(insertLine, 0), total);
 
-    const minLine = Math.min(insertAt, ...sorted.map((r) => r.start));
-    const maxLine = Math.max(insertAt - 1, ...sorted.map((r) => r.end));
+    // 跨列表移动时，落点之后属于目标列表的项在原 span 之外，不扩进来序号修不到
+    const expanded = expandToListSpan(
+      editor,
+      Math.min(insertAt, ...sorted.map((r) => r.start)),
+      Math.max(insertAt - 1, ...sorted.map((r) => r.end))
+    );
+    const minLine = expanded.from;
+    const maxLine = expanded.to;
     if (maxLine < minLine) return;
 
     const span = getLines(editor, minLine, maxLine);
@@ -51,7 +89,14 @@ export class BlockOps {
 
     const out = kept.slice(0, at).concat(moved, kept.slice(at));
     const oldText = span.join('\n');
-    const newText = out.join('\n');
+
+    // 有序列表重编号：Live Preview 显示的是源码数字，搬完必须顺着新位置连号。
+    // 起始号取自**搬运前**的层快照 —— 否则「1. 甲」被拖走后剩下的 2. 乙
+    // 会把整段带成 2/3/4。
+    const renumbered = renumberOrdered(out, {
+      layerStarts: collectLayerStarts(span),
+    });
+    const newText = renumbered.lines.join('\n');
     if (oldText === newText) return;
 
     // 视口锁定：整段重写会让 CM6 按变更重算视口（移动块/栏/行后整页跳动），
@@ -99,16 +144,32 @@ export class BlockOps {
     } else if (quotePrefix != null) {
       for (let i = 0; i < moved.length; i++) moved[i] = quotePrefix + moved[i];
     }
-    const text = moved.join('\n');
     const total = editor.lineCount();
     const insertAt = Math.min(Math.max(insertLine, 0), total);
-    // 视口锁定：插入/复制同属编辑操作，视图停在当前编辑位置（不因重算视口跳动）
+
+    // 插入会挤动落点之后同列表的项，序号得顺着新位置重排 → span 扩到整个列表段。
+    // 落点落在文档尾时以最后一行为锚（它属于目标列表）。
+    const anchorLine = Math.min(insertAt, total - 1);
+    const expanded = expandToListSpan(editor, anchorLine, anchorLine);
+    const from = expanded.from;
+    const to = expanded.to;
+    const at = Math.max(0, Math.min(insertAt - from, to - from + 1));
+    const span = getLines(editor, from, to);
+    const out = span.slice(0, at).concat(moved, span.slice(at));
+
+    // 副本按落点位置取号；起始号同样取自搬运前的快照
+    const renumbered = renumberOrdered(out, { layerStarts: collectLayerStarts(span) });
+    const newText = renumbered.lines.join('\n');
+    const oldText = span.join('\n');
+    if (oldText === newText) return;
+
+    // 视口锁定：插入 / 复制同属编辑操作，视图停在当前编辑位置（不因重算视口跳动）
     keepViewport(getCM(editor), () => {
-      if (insertAt >= total) {
-        editor.replaceRange('\n' + text, { line: total - 1, ch: editor.getLine(total - 1).length });
-      } else {
-        editor.replaceRange(text + '\n', { line: insertAt, ch: 0 });
-      }
+      editor.replaceRange(
+        newText,
+        { line: from, ch: 0 },
+        { line: to, ch: editor.getLine(to).length }
+      );
     });
   }
 
@@ -130,24 +191,43 @@ export class BlockOps {
     this.removeRanges(sourceEditor, sorted);
   }
 
-  // 自下而上删除行区间，避免行号失效
+  /**
+   * 删除若干行区间。整段重写一次 —— 既保证多段删除只产生一步撤销，
+   * 也能在同一段文本里顺带重编号有序列表（删中间项后序号会断层）。
+   * span 向外扩到列表段边界，避免只修到被删行附近而漏掉后续项。
+   */
   removeRanges(editor: Editor, ranges: BlockRange[]): void {
-    const sorted = [...ranges].sort((a, b) => b.start - a.start);
+    if (!ranges.length) return;
+    const sorted = [...ranges].sort((a, b) => a.start - b.start);
+    const total = editor.lineCount();
+
+    const expanded = expandToListSpan(
+      editor,
+      Math.min(...sorted.map((r) => r.start)),
+      Math.max(...sorted.map((r) => r.end))
+    );
+    const from = expanded.from;
+    const to = Math.min(expanded.to, total - 1);
+    if (to < from) return;
+
+    const span = getLines(editor, from, to);
+    const kept = span.filter(
+      (_, i) => !sorted.some((r) => from + i >= r.start && from + i <= r.end)
+    );
+    const oldText = span.join('\n');
+    // 删除后首行可能变成原来的 2./3.，用搬运前的层快照还原起始值
+    const newText = renumberOrdered(kept, { layerStarts: collectLayerStarts(span) }).lines.join(
+      '\n'
+    );
+    if (oldText === newText) return;
+
     // 视口锁定：删除同属编辑操作，视图停在当前编辑位置（不因重算视口跳动）
     keepViewport(getCM(editor), () => {
-      for (const { start, end } of sorted) {
-        if (end < editor.lineCount() - 1) {
-          editor.replaceRange('', { line: start, ch: 0 }, { line: end + 1, ch: 0 });
-        } else if (start > 0) {
-          editor.replaceRange(
-            '',
-            { line: start - 1, ch: editor.getLine(start - 1).length },
-            { line: end, ch: editor.getLine(end).length }
-          );
-        } else {
-          editor.replaceRange('', { line: 0, ch: 0 }, { line: end, ch: editor.getLine(end).length });
-        }
-      }
+      editor.replaceRange(
+        newText,
+        { line: from, ch: 0 },
+        { line: to, ch: editor.getLine(to).length }
+      );
     });
   }
 
@@ -219,14 +299,23 @@ export class BlockOps {
     this.ctx.handle.hideHandle();
   }
 
-  // 就地复制一份块。副本剥掉块 ID，避免同文出现重复 ID；
-  // 块 ID 独立成行时副本插到 ID 行之后，ID 才仍指向原块
+  /**
+   * 就地复制一份块。副本剥掉块 ID，避免同文出现重复 ID；
+   * 块 ID 独立成行时副本插到 ID 行之后，ID 才仍指向原块。
+   *
+   * 整段重写一次：多块副本只产生一步撤销，且能在同一段里重编号有序列表
+   * （副本行标 volatile，序号顺着新位置连）。
+   */
   duplicateBlock(block: BlockContext): void {
     const editor = block.editor;
     const ranges = [...this.ctx.selection.actionRanges(block)].sort((a, b) => a.start - b.start);
-    // 自下而上插副本，避免行号失效
-    for (let i = ranges.length - 1; i >= 0; i--) {
-      const { start, end } = ranges[i];
+    if (!ranges.length) return;
+
+    // 每块的副本插到哪一行之后（块 ID 独立成行时插到 ID 行之后）
+    const copies: { after: number; lines: string[] }[] = [];
+    let lo = Infinity;
+    let hi = -1;
+    for (const { start, end } of ranges) {
       const idLine = this.ctx.ids.findOwnLineIdLine(editor, end);
       const insertAfter = idLine !== null ? idLine : end;
       let text = getLines(editor, start, end).join('\n');
@@ -235,11 +324,39 @@ export class BlockOps {
         .filter((l) => !/^\s*\^[A-Za-z0-9-]+\s*$/.test(l))
         .map((l) => l.replace(/\s\^[A-Za-z0-9-]+\s*$/, ''));
       if (stripped.join('\n').trim() !== '') text = stripped.join('\n');
-      editor.replaceRange('\n' + text, {
-        line: insertAfter,
-        ch: editor.getLine(insertAfter).length,
-      });
+      copies.push({ after: insertAfter, lines: text.split('\n') });
+      lo = Math.min(lo, start);
+      hi = Math.max(hi, insertAfter);
     }
+    if (!copies.length || hi < lo) return;
+
+    const expanded = expandToListSpan(editor, lo, hi);
+    const from = expanded.from;
+    const to = expanded.to;
+    const span = getLines(editor, from, to);
+
+    const out: string[] = [];
+    for (let i = 0; i < span.length; i++) {
+      out.push(span[i]);
+      for (const c of copies) {
+        if (from + i !== c.after) continue;
+        for (const l of c.lines) out.push(l);
+      }
+    }
+
+    const oldText = span.join('\n');
+    const newText = renumberOrdered(out, { layerStarts: collectLayerStarts(span) }).lines.join(
+      '\n'
+    );
+    if (oldText === newText) return;
+
+    keepViewport(getCM(editor), () => {
+      editor.replaceRange(
+        newText,
+        { line: from, ch: 0 },
+        { line: to, ch: editor.getLine(to).length }
+      );
+    });
     this.ctx.handle.hideHandle();
   }
 

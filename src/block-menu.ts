@@ -133,6 +133,25 @@ export class BlockMenuController {
           .setDisabled(this.ctx.converter.columnsSegmentCount(block) < 2)
           .onClick(() => this.ctx.converter.wrapBlockToColumns(block))
       );
+
+      // 列表专用：「组合为分栏」按空行切段，列表项之间通常无空行 → 切不出栏。
+      // 故对列表块另给两个按缩进层级切分的入口。
+      if (block.type === 'list') {
+        const byParent = this.ctx.converter.listColumnCount(block, 'parent');
+        const byChild = this.ctx.converter.listColumnCount(block, 'child');
+        menu.addItem((mi) =>
+          mi
+            .setTitle('列·父项')
+            .setDisabled(byParent < 2)
+            .onClick(() => this.ctx.converter.wrapListToColumns(block, 'parent'))
+        );
+        menu.addItem((mi) =>
+          mi
+            .setTitle('列·子项')
+            .setDisabled(byChild < 2)
+            .onClick(() => this.ctx.converter.wrapListToColumns(block, 'child'))
+        );
+      }
     }
 
     menu.addSeparator();

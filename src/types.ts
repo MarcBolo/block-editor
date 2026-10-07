@@ -59,7 +59,37 @@ export interface BlockContext extends BlockRange {
 export type TurnIntoItem = [TurnIntoType, string];
 
 /** 斜杠「插入类」动作 id：只插入内容，不改变块类型 */
-export type InsertActionId = 'image' | 'audio' | 'video' | 'pdf';
+export type InsertActionId =
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'pdf'
+  | 'date'
+  | 'time'
+  | 'datetime'
+  | 'math'
+  | 'inlinecode'
+  | 'highlight'
+  | 'note'
+  | 'embednote'
+  | 'blockref'
+  | 'blockembed';
+
+/**
+ * 插入类动作的执行规格：决定 BlockInserter 怎么拿内容、插什么。
+ * 新增命令只需在 constants.ts 的 INSERT_SPECS 里加一行，执行器按 kind 分派。
+ */
+export type InsertSpec =
+  /** 从 vault 选一个媒体文件（按扩展名过滤） */
+  | { kind: 'pick'; exts: string[] }
+  /** 插入固定文本；caret = 光标相对插入起点的偏移（`$$` → 1，落在两个 $ 中间） */
+  | { kind: 'snippet'; text: string; caret: number }
+  /** 按当前时间格式化后插入（date / time / datetime） */
+  | { kind: 'dynamic'; dyn: 'date' | 'time' | 'datetime' }
+  /** 选一篇笔记 → `[[链接]]` 或 `![[嵌入]]` */
+  | { kind: 'note'; embed: boolean }
+  /** 选一篇笔记再选其中一个块 → `[[笔记#^id]]` 或 `![[笔记#^id]]` */
+  | { kind: 'blockref'; embed: boolean };
 
 /** 斜杠建议的统一条目：转换块类型 / 插入内容 */
 export type SlashItem =
@@ -84,7 +114,15 @@ export interface CMView {
   scrollDOM: HTMLElement;
   contentDOM: HTMLElement;
   state: { doc: CMDoc };
+  /**
+   * 分发事务。注意：getCM() 返回的**就是 EditorView 本身**（Editor.cm 即视图），
+   * 不是包着 view 的包装对象 —— 要直接调 cm.dispatch(...)，没有 cm.view。
+   * 多段编辑合并为单事务（单步撤销）时也走这里。
+   */
+  dispatch(spec: { changes: unknown }): void;
   posAtCoords(coords: { x: number; y: number }): number | null;
   coordsAtPos(pos: number): { top: number; bottom: number; left: number; right: number } | null;
+  /** 取该文档位置所在的 DOM 节点，用于反查所在 .cm-line（找折叠图标） */
+  domAtPos(pos: number): { node: Node; offset: number };
   hasFocus(): boolean;
 }
